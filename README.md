@@ -1,4 +1,4 @@
-# 🚀 VigiLens: Multi-Modal Video Anomaly Detection using Spatio-Temporal Deep Learning
+# VigiLens: Multi-Modal Video Anomaly Detection using Spatio-Temporal Deep Learning
 
 ---
 
