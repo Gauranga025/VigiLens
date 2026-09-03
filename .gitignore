@@ -1,0 +1,180 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.pytype/
+.tox/
+.hypothesis/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE/editor
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# Environment/secrets
+.env
+.env.*
+!.env.example
+secrets.toml
+*.pem
+*.key
+*.crt
+
+# Logs
+*.log
+logs/
+log/
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+*.swo
+*.bak
+*.cache
+
+# Datasets and video data
+data/
+dataset/
+datasets/
+Data/
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+*.flv
+*.wmv
+*.m4v
+*.3gp
+
+# Extracted frames
+frames/
+extracted_frames/
+video_frames/
+data/**/*.jpg
+data/**/*.jpeg
+data/**/*.png
+data/**/*.bmp
+data/**/*.tiff
+results/**/*.jpg
+results/**/*.jpeg
+results/**/*.png
+results/**/*.bmp
+results/**/*.tiff
+
+# Generated experiment outputs
+results/
+outputs/
+output/
+runs/
+experiments/
+checkpoints/
+artifacts/
+tmp/
+temp/
+*.gif
+
+# Model weights and checkpoints
+*.pt
+*.pth
+*.onnx
+*.h5
+*.hdf5
+*.keras
+*.ckpt
+*.safetensors
+*.bin
+*.pkl
+*.pickle
+*.joblib
+*.pb
+*.tflite
+
+# ML caches
+.cache/
+huggingface/
+transformers_cache/
+torch_cache/
+wandb/
+mlruns/
+*.cache
+
+# Streamlit
+.streamlit/secrets.toml
+.streamlit/cache/
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+*.ipynb
+
+# Testing
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+*.cover
+
+# Documentation builds
+docs/_build/
+docs/.doctrees/
+site/
+
+# Docker/build artifacts
+*.tar
+*.tar.gz
+*.tar.bz2
+*.zip
+*.rar
+docker-compose.override.yml
+
+# NumPy data
+*.npy
+*.npz
+
+# Training data
+training.npy
+*.mat
+*.csv
+*.json
+!requirements.txt
+!package.json
