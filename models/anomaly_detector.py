@@ -25,10 +25,11 @@ logger = logging.getLogger(__name__)
 
 class DistanceAnomalyDetector:
     """
-    Distance-based anomaly detector.
+    Distance-based anomaly detector with explicit calibration/inference phases.
     
     Computes anomaly score as distance from reference features.
-    Uses a running average of recent features as the reference.
+    Separates calibration phase (building normal reference) from inference phase
+    (detecting anomalies against frozen reference).
     """
     
     def __init__(self,
@@ -50,12 +51,19 @@ class DistanceAnomalyDetector:
         self.adaptive = adaptive
         self.window_size = window_size
         
-        # Reference features (running average)
+        # Reference features (frozen during inference)
         self.reference_features = None
-        self.feature_history = deque(maxlen=window_size)
+        self.reference_built = False
+        
+        # Calibration data
+        self.calibration_features = []
+        self.calibration_window_size = 100
         
         # Statistics for adaptive threshold
         self.score_history = deque(maxlen=window_size)
+        
+        # Mode: 'calibration' or 'inference'
+        self.mode = 'calibration'
         
         logger.info(f"Anomaly detector initialized: metric={distance_metric}, threshold={threshold}")
     
@@ -83,21 +91,42 @@ class DistanceAnomalyDetector:
         
         return float(distance)
     
-    def update_reference(self, features: np.ndarray):
+    def start_calibration(self):
+        """Start calibration phase to build normal reference."""
+        self.mode = 'calibration'
+        self.calibration_features = []
+        self.reference_built = False
+        logger.info("Started calibration phase")
+    
+    def add_calibration_sample(self, features: np.ndarray):
         """
-        Update reference features using running average.
+        Add a calibration sample (assumed normal behavior).
         
         Args:
-            features: New feature vector
+            features: Feature vector from normal frame
         """
-        if self.reference_features is None:
-            self.reference_features = features.copy()
-        else:
-            # Exponential moving average
-            alpha = 0.1
-            self.reference_features = (1 - alpha) * self.reference_features + alpha * features
+        if self.mode != 'calibration':
+            logger.warning("Not in calibration mode, sample ignored")
+            return
         
-        self.feature_history.append(features.copy())
+        self.calibration_features.append(features.copy())
+        
+        if len(self.calibration_features) >= self.calibration_window_size:
+            self.build_reference()
+    
+    def build_reference(self):
+        """Build reference from calibration samples and switch to inference."""
+        if len(self.calibration_features) == 0:
+            logger.warning("No calibration samples, using mean of zeros")
+            self.reference_features = np.zeros(2048)
+        else:
+            # Use mean of calibration samples as reference
+            self.reference_features = np.mean(self.calibration_features, axis=0)
+        
+        self.reference_built = True
+        self.mode = 'inference'
+        logger.info(f"Reference built from {len(self.calibration_features)} samples")
+        logger.info("Switched to inference phase")
     
     def detect(self, features: np.ndarray) -> tuple[float, bool]:
         """
@@ -109,17 +138,21 @@ class DistanceAnomalyDetector:
         Returns:
             Tuple of (anomaly_score, is_anomalous)
         """
-        if self.reference_features is None:
-            # First frame - initialize and return normal
-            self.update_reference(features)
+        if self.mode == 'calibration':
+            # During calibration, add sample and return normal
+            self.add_calibration_sample(features)
+            return 0.0, False
+        
+        if not self.reference_built:
+            logger.warning("Reference not built, auto-building from current frame")
+            self.build_reference()
             return 0.0, False
         
         # Compute distance from reference
         score = self.compute_distance(features, self.reference_features)
         
-        # Update reference (only if not anomalous)
-        if score < self.threshold:
-            self.update_reference(features)
+        # Reference is frozen during inference - no updates
+        # This prevents anomalies from contaminating the reference
         
         # Adaptive threshold
         if self.adaptive:
@@ -137,18 +170,22 @@ class DistanceAnomalyDetector:
         return score, is_anomalous
     
     def reset(self):
-        """Reset detector state."""
+        """Reset detector state and return to calibration mode."""
         self.reference_features = None
+        self.reference_built = False
+        self.calibration_features = []
         self.feature_history.clear()
         self.score_history.clear()
-        logger.info("Anomaly detector reset")
+        self.mode = 'calibration'
+        logger.info("Anomaly detector reset - returned to calibration mode")
 
 
 class AnomalyScorer:
     """
-    Anomaly scorer that provides calibrated scores.
+    Anomaly scorer with statistical calibration.
     
-    Normalizes distance scores to [0, 1] range for better interpretation.
+    Provides calibrated anomaly scores based on calibration data statistics.
+    Separates raw distance from normalized score for transparency.
     """
     
     def __init__(self, detector: DistanceAnomalyDetector):
@@ -159,27 +196,67 @@ class AnomalyScorer:
             detector: Base anomaly detector
         """
         self.detector = detector
-        self.max_distance = 10.0  # Expected maximum distance
-        self.min_distance = 0.0
+        
+        # Calibration statistics
+        self.calibration_distances = []
+        self.mean_distance = None
+        self.std_distance = None
+        self.calibrated = False
+    
+    def calibrate(self, distances: list[float]):
+        """
+        Calibrate scorer using normal reference distances.
+        
+        Args:
+            distances: List of distances from normal calibration samples
+        """
+        if len(distances) == 0:
+            logger.warning("No calibration distances provided")
+            return
+        
+        self.calibration_distances = distances.copy()
+        self.mean_distance = np.mean(distances)
+        self.std_distance = np.std(distances)
+        self.calibrated = True
+        
+        logger.info(f"Scorer calibrated: mean={self.mean_distance:.4f}, std={self.std_distance:.4f}")
     
     def score(self, features: np.ndarray) -> tuple[float, float, bool]:
         """
-        Get normalized anomaly score.
+        Get anomaly score with calibration.
         
         Args:
             features: Feature vector
         
         Returns:
-            Tuple of (raw_score, normalized_score, is_anomalous)
+            Tuple of (raw_distance, normalized_score, is_anomalous)
         """
-        raw_score, is_anomalous = self.detector.detect(features)
+        raw_distance, is_anomalous = self.detector.detect(features)
         
-        # Normalize to [0, 1]
-        normalized = (raw_score - self.min_distance) / (self.max_distance - self.min_distance + 1e-8)
-        normalized = np.clip(normalized, 0.0, 1.0)
+        if not self.calibrated:
+            # Return raw distance if not calibrated
+            return raw_distance, raw_distance, is_anomalous
         
-        return raw_score, normalized, is_anomalous
+        # Normalize using z-score: (distance - mean) / std
+        if self.std_distance > 1e-8:
+            normalized = (raw_distance - self.mean_distance) / self.std_distance
+        else:
+            normalized = raw_distance - self.mean_distance
+        
+        return raw_distance, normalized, is_anomalous
     
-    def update_max_distance(self, new_max: float):
-        """Update expected maximum distance."""
-        self.max_distance = new_max
+    def get_threshold_from_percentile(self, percentile: float = 95.0) -> float:
+        """
+        Get threshold based on calibration percentile.
+        
+        Args:
+            percentile: Percentile (e.g., 95 for 95th percentile)
+        
+        Returns:
+            Threshold value
+        """
+        if not self.calibrated:
+            logger.warning("Scorer not calibrated, returning default threshold")
+            return self.detector.threshold
+        
+        return np.percentile(self.calibration_distances, percentile)

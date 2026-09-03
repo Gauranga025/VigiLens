@@ -50,13 +50,15 @@ class MultimodalFusion:
     
     def fuse(self,
              visible_features: np.ndarray,
-             ir_features: Optional[np.ndarray] = None) -> np.ndarray:
+             ir_features: Optional[np.ndarray] = None,
+             normalize: bool = True) -> np.ndarray:
         """
         Fuse visible and IR features.
         
         Args:
             visible_features: Visible feature vector (2048,)
             ir_features: IR feature vector (2048,) or None if IR unavailable
+            normalize: Whether to L2-normalize features before fusion
         
         Returns:
             Fused feature vector
@@ -74,10 +76,18 @@ class MultimodalFusion:
         For average fusion:
             F_fused = (F_visible + F_IR) / 2
             Dimension: 2048
+        
+        Note: Features are L2-normalized before fusion to ensure numerical
+        comparability between modalities, especially for weighted/average fusion.
         """
         if ir_features is None:
             logger.warning("IR features unavailable, using visible only")
             return visible_features
+        
+        # Normalize features if requested (important for weighted/average fusion)
+        if normalize:
+            visible_features = self._l2_normalize(visible_features)
+            ir_features = self._l2_normalize(ir_features)
         
         if self.method == "concat":
             # Concatenate features
@@ -99,6 +109,21 @@ class MultimodalFusion:
             raise ValueError(f"Unknown fusion method: {self.method}")
         
         return fused
+    
+    def _l2_normalize(self, features: np.ndarray) -> np.ndarray:
+        """
+        L2-normalize feature vector.
+        
+        Args:
+            features: Feature vector
+        
+        Returns:
+            L2-normalized feature vector
+        """
+        norm = np.linalg.norm(features)
+        if norm > 1e-8:
+            return features / norm
+        return features
     
     def get_output_dim(self, visible_dim: int, ir_dim: int) -> int:
         """

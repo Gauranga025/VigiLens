@@ -47,7 +47,7 @@ class MultimodalAnomalyPipeline:
             config: System configuration
         """
         self.config = config
-        
+
         # Initialize components
         self.preprocessor = FramePreprocessor(
             target_size=(config.preprocessing.target_height,
@@ -55,45 +55,54 @@ class MultimodalAnomalyPipeline:
             normalize=config.preprocessing.normalize,
             ir_as_rgb=config.preprocessing.ir_as_rgb
         )
-        
+
         # Initialize feature extractors
         device = config.model.device
         self.visible_extractor = VisibleFeatureExtractor(device)
         self.ir_extractor = IRFeatureExtractor(device)
-        
-        # Initialize fusion
+
+        # Initialize fusion with normalization
         self.fusion = MultimodalFusion(
             method=config.fusion.fusion_method,
             visible_weight=config.fusion.visible_weight,
             ir_weight=config.fusion.ir_weight
         )
-        
-        # Initialize anomaly detector
+
+        # Initialize anomaly detector with calibration support
         self.detector = DistanceAnomalyDetector(
             distance_metric=config.anomaly.distance_metric,
             threshold=config.anomaly.anomaly_threshold,
             adaptive=config.anomaly.adaptive_threshold,
             window_size=config.anomaly.threshold_window
         )
-        
-        # Initialize scorer
+        self.detector.calibration_window_size = config.anomaly.calibration_window_size
+
+        # Initialize scorer with statistical calibration
         self.scorer = AnomalyScorer(self.detector)
-        
-        # Initialize temporal smoother
+
+        # Initialize temporal smoother with decision threshold
         self.smoother = TemporalSmoother(
             method=config.temporal.smoothing_method,
             window_size=config.temporal.window_size,
             consecutive_frames=config.temporal.consecutive_frames,
-            alpha=config.temporal.alpha
+            alpha=config.temporal.alpha,
+            decision_threshold=config.temporal.decision_threshold
         )
-        
+
         # Frame source (initialized later)
         self.frame_source: Optional[MultimodalFrameSource] = None
-        
+
         # Statistics
         self.frame_count = 0
         self.total_inference_time = 0.0
-        
+
+        # Calibration state
+        self.calibration_distances = []
+
+        # Auto-start calibration if configured
+        if config.anomaly.auto_calibrate:
+            self.detector.start_calibration()
+
         logger.info("Multimodal pipeline initialized")
     
     def load_source(self, visible_source: str, ir_source: Optional[str] = None):
@@ -116,55 +125,86 @@ class MultimodalAnomalyPipeline:
                      ir_frame: Optional[np.ndarray] = None) -> Dict[str, Any]:
         """
         Process a single frame pair.
-        
+
         Args:
             visible_frame: Visible RGB frame
             ir_frame: IR frame (optional)
-        
+
         Returns:
             Dictionary containing processing results
         """
         start_time = time.time()
-        
-        # Preprocess
-        visible_prep, ir_prep = self.preprocessor.preprocess_pair(
-            visible_frame, ir_frame
-        )
-        
-        # Extract features
-        visible_features = self.visible_extractor.extract_from_numpy(visible_prep)
-        
-        ir_features = None
-        if ir_prep is not None:
-            ir_features = self.ir_extractor.extract_from_numpy(ir_prep)
-        
-        # Fuse features
-        fused_features = self.fusion.fuse(visible_features, ir_features)
-        
-        # Detect anomaly
-        raw_score, norm_score, is_anomalous = self.scorer.score(fused_features)
-        
-        # Temporal smoothing
-        smoothed_score, smoothed_anomalous = self.smoother.smooth(
-            norm_score, is_anomalous
-        )
-        
-        # Update statistics
-        inference_time = time.time() - start_time
-        self.total_inference_time += inference_time
-        self.frame_count += 1
-        
-        return {
-            'visible_features': visible_features,
-            'ir_features': ir_features,
-            'fused_features': fused_features,
-            'raw_score': raw_score,
-            'normalized_score': norm_score,
-            'smoothed_score': smoothed_score,
-            'is_anomalous': smoothed_anomalous,
-            'inference_time': inference_time,
-            'ir_available': ir_frame is not None
-        }
+
+        try:
+            # Preprocess
+            visible_prep, ir_prep = self.preprocessor.preprocess_pair(
+                visible_frame, ir_frame
+            )
+
+            # Extract features
+            visible_features = self.visible_extractor.extract_from_numpy(visible_prep)
+
+            ir_features = None
+            if ir_prep is not None:
+                ir_features = self.ir_extractor.extract_from_numpy(ir_prep)
+
+            # Fuse features with normalization
+            fused_features = self.fusion.fuse(
+                visible_features,
+                ir_features,
+                normalize=self.config.fusion.normalize_features
+            )
+
+            # Detect anomaly
+            raw_distance, norm_score, is_anomalous = self.scorer.score(fused_features)
+
+            # Collect calibration distances during calibration phase
+            if self.detector.mode == 'calibration':
+                self.calibration_distances.append(raw_distance)
+                # Auto-calibrate scorer when calibration completes
+                if self.detector.reference_built:
+                    self.scorer.calibrate(self.calibration_distances)
+
+            # Temporal smoothing
+            smoothed_score, smoothed_anomalous = self.smoother.smooth(
+                norm_score, is_anomalous
+            )
+
+            # Update statistics
+            inference_time = time.time() - start_time
+            self.total_inference_time += inference_time
+            self.frame_count += 1
+
+            return {
+                'visible_features': visible_features,
+                'ir_features': ir_features,
+                'fused_features': fused_features,
+                'raw_distance': raw_distance,
+                'normalized_score': norm_score,
+                'smoothed_score': smoothed_score,
+                'is_anomalous': smoothed_anomalous,
+                'inference_time': inference_time,
+                'ir_available': ir_frame is not None,
+                'calibration_mode': self.detector.mode == 'calibration',
+                'error': None
+            }
+
+        except Exception as e:
+            logger.error(f"Error processing frame: {e}")
+            inference_time = time.time() - start_time
+            return {
+                'visible_features': None,
+                'ir_features': None,
+                'fused_features': None,
+                'raw_distance': 0.0,
+                'normalized_score': 0.0,
+                'smoothed_score': 0.0,
+                'is_anomalous': False,
+                'inference_time': inference_time,
+                'ir_available': ir_frame is not None,
+                'calibration_mode': self.detector.mode == 'calibration',
+                'error': str(e)
+            }
     
     def process_video(self) -> Dict[str, Any]:
         """
@@ -208,12 +248,18 @@ class MultimodalAnomalyPipeline:
         }
     
     def reset(self):
-        """Reset pipeline state."""
+        """Reset pipeline state and return to calibration mode."""
         self.detector.reset()
         self.smoother.reset()
         self.frame_count = 0
         self.total_inference_time = 0.0
-        logger.info("Pipeline reset")
+        self.calibration_distances = []
+
+        # Restart calibration if auto-calibrate is enabled
+        if self.config.anomaly.auto_calibrate:
+            self.detector.start_calibration()
+
+        logger.info("Pipeline reset - returned to calibration mode")
     
     def get_fps(self) -> float:
         """Get current average FPS."""

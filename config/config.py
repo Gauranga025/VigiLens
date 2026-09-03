@@ -53,15 +53,18 @@ class PreprocessingConfig:
 @dataclass
 class FusionConfig:
     """Configuration for multimodal fusion."""
-    
+
     fusion_method: Literal["concat", "weighted", "average"] = "concat"
-    
+
     # Weighted fusion parameters
     visible_weight: float = 0.6
     ir_weight: float = 0.4
-    
+
     # Fusion output dimension
     fused_dim: int = 4096  # 2048 + 2048 for concatenation
+
+    # Feature normalization
+    normalize_features: bool = True  # L2-normalize before fusion
 
 
 @dataclass
@@ -82,21 +85,28 @@ class AnomalyConfig:
     # Adaptive threshold
     adaptive_threshold: bool = False
     threshold_window: int = 100
+    
+    # Calibration settings
+    calibration_window_size: int = 100  # Number of frames for calibration
+    auto_calibrate: bool = True  # Auto-start calibration on first frames
 
 
-@dataclass  
+@dataclass
 class TemporalConfig:
     """Configuration for temporal smoothing."""
-    
+
     # Smoothing method
     smoothing_method: Literal["moving_average", "exponential", "consecutive"] = "moving_average"
-    
+
     # Window parameters
     window_size: int = 10
     consecutive_frames: int = 3
-    
+
     # Exponential smoothing
     alpha: float = 0.3  # Smoothing factor for exponential smoothing
+
+    # Decision threshold for final anomaly decision
+    decision_threshold: float = 0.5
 
 
 @dataclass

@@ -74,18 +74,18 @@ class VideoFrameSource(MultimodalFrameSource):
     def __init__(self, visible_video: Union[str, Path], ir_video: Optional[Union[str, Path]] = None):
         """
         Initialize video frame source.
-        
+
         Args:
             visible_video: Path to visible video file (mp4, avi, mov)
             ir_video: Path to IR/thermal video file (optional)
         """
         super().__init__(visible_video, ir_video)
-        
+
         # Open visible video
         self.visible_cap = cv2.VideoCapture(str(self.visible_source))
         if not self.visible_cap.isOpened():
             raise RuntimeError(f"Could not open visible video: {visible_video}")
-        
+
         # Open IR video if available
         self.ir_cap = None
         if self.ir_available:

@@ -52,6 +52,10 @@ st.markdown("---")
 # ------------------ SIDEBAR CONFIGURATION ------------------
 st.sidebar.header("System Configuration")
 
+# Processing settings
+st.sidebar.subheader("Processing")
+device = st.sidebar.selectbox("Device", ["cuda", "cpu"])
+
 # Anomaly detection settings
 st.sidebar.subheader("Anomaly Detection")
 anomaly_threshold = st.sidebar.slider("Anomaly Threshold", 0.0, 1.0, 0.65, 0.05)
@@ -64,10 +68,11 @@ smoothing_method = st.sidebar.selectbox("Smoothing Method", ["moving_average", "
 window_size = st.sidebar.slider("Window Size", 1, 30, 10)
 consecutive_frames = st.sidebar.slider("Consecutive Frames", 1, 10, 3)
 
-# Fusion settings
-st.sidebar.subheader("Multimodal Fusion")
-fusion_method = st.sidebar.selectbox("Fusion Method", ["concat", "weighted", "average"])
-visible_weight = st.sidebar.slider("Visible Weight", 0.0, 1.0, 0.6, 0.1)
+# Calibration
+st.sidebar.subheader("Calibration")
+calibration_frames = st.sidebar.slider("Calibration Frames", 10, 200, 100, 10)
+auto_calibrate = st.sidebar.checkbox("Auto-Calibrate on Start", value=True)
+reset_calibration = st.sidebar.button("Reset Calibration")
 
 # Display settings
 st.sidebar.subheader("Display")
@@ -77,6 +82,7 @@ show_bboxes = st.sidebar.checkbox("Show Object Bounding Boxes", value=True)
 st.sidebar.markdown("---")
 st.sidebar.text("Model: ResNet50 (Pretrained)")
 st.sidebar.text("Method: Distance-based Scoring")
+st.sidebar.text("Fusion: Concatenation")
 st.sidebar.text("No training required")
 
 # ------------------ FILE INPUT ------------------
@@ -94,15 +100,17 @@ with col_ir:
 if visible_file:
     # Update config
     config = get_config()
+    config.model.device = device
     config.anomaly.anomaly_threshold = anomaly_threshold
     config.anomaly.distance_metric = distance_metric
     config.anomaly.adaptive_threshold = adaptive_threshold
+    config.anomaly.calibration_window_size = calibration_frames
+    config.anomaly.auto_calibrate = auto_calibrate
     config.temporal.smoothing_method = smoothing_method
     config.temporal.window_size = window_size
     config.temporal.consecutive_frames = consecutive_frames
-    config.fusion.fusion_method = fusion_method
-    config.fusion.visible_weight = visible_weight
-    config.fusion.ir_weight = 1.0 - visible_weight
+    # Fusion is fixed to concatenation in Phase 1
+    config.fusion.fusion_method = "concat"
 
     # Save uploaded files
     visible_path = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
@@ -141,16 +149,23 @@ if visible_file:
             m_fps = st.empty()
             m_frame = st.empty()
             m_ir = st.empty()
+            m_calibration = st.empty()
 
             st.markdown("---")
             st.subheader("Objects")
             m_objects = st.empty()
 
         status_box = st.empty()
+        calibration_box = st.empty()
 
         # Process video
         frame_count = 0
         score_history = deque(maxlen=50)
+
+        # Handle reset calibration button
+        if reset_calibration:
+            pipeline.reset()
+            st.success("Calibration reset - starting new calibration phase")
 
         while True:
             visible_frame, ir_frame = pipeline.frame_source.read()
@@ -183,9 +198,15 @@ if visible_file:
             m_fps.metric("FPS", f"{1.0/result['inference_time']:.1f}")
             m_frame.metric("Frame", frame_count)
             m_ir.metric("IR Available", "Yes" if result['ir_available'] else "No")
+            m_calibration.metric("Mode", "CALIBRATING" if result['calibration_mode'] else "INFERENCE")
             m_objects.metric("Objects", object_count)
 
             # Update status box
+            if result['calibration_mode']:
+                calibration_box.info("CALIBRATING...")
+            else:
+                calibration_box.empty()
+
             if result['is_anomalous']:
                 status_box.error("ANOMALY DETECTED")
             else:
