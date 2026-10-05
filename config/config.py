@@ -2,129 +2,84 @@
 Configuration module for VigiLens multimodal anomaly detection system.
 
 This module contains all configurable parameters for the system including:
-- Model settings
-- Preprocessing parameters
-- Anomaly detection thresholds
-- Temporal smoothing settings
-- Fusion method configuration
+- Model settings (ResNet50, LSTM, fusion)
+- Training parameters
+- Inference parameters
+- Calibration parameters
 """
 
 from dataclasses import dataclass
-from typing import Literal
 
 
 @dataclass
 class ModelConfig:
-    """Configuration for pretrained feature extraction models."""
+    """Configuration for model architecture."""
     
-    # Visible encoder settings
-    visible_encoder: str = "resnet50"  # ResNet50 pretrained on ImageNet
-    visible_feature_dim: int = 2048  # ResNet50 output dimension
+    # Feature extraction
+    visible_encoder: str = "resnet50"
+    ir_encoder: str = "resnet50"
+    feature_dim: int = 2048
+    input_size: tuple = (224, 224)
     
-    # IR encoder settings
-    ir_encoder: str = "resnet50"  # Using same architecture for IR
-    ir_feature_dim: int = 2048
+    # Fusion
+    fusion_hidden_dim: int = 256
+    fusion_output_dim: int = 512
     
-    # Model loading
-    device: str = "cuda"  # Will fallback to CPU if CUDA unavailable
-    pretrained_weights: bool = True
+    # LSTM
+    lstm_hidden_size: int = 256
+    lstm_layers: int = 2
+    lstm_dropout: float = 0.2
+    
+    # Device
+    device: str = "cuda"
 
 
 @dataclass
-class PreprocessingConfig:
-    """Configuration for preprocessing visible and IR frames."""
+class TrainingConfig:
+    """Configuration for training."""
     
-    # Target dimensions
-    target_height: int = 224
-    target_width: int = 224
+    # Dataset
+    sequence_length: int = 16
+    rgb_dropout_prob: float = 0.15
+    ir_dropout_prob: float = 0.15
     
-    # Normalization
-    normalize: bool = True
-    mean_visible: tuple = (0.485, 0.456, 0.406)  # ImageNet mean
-    std_visible: tuple = (0.229, 0.224, 0.225)   # ImageNet std
-    mean_ir: tuple = (0.5,)  # For single-channel IR
-    std_ir: tuple = (0.5,)
+    # Training
+    batch_size: int = 4
+    learning_rate: float = 1e-4
+    num_epochs: int = 100
+    train_ratio: float = 0.8
     
-    # IR channel handling
-    ir_as_rgb: bool = True  # Convert IR to 3-channel for RGB encoder
-    ir_replication: bool = True  # Replicate IR channel to 3 channels
+    # Checkpointing
+    checkpoint_dir: str = "checkpoints"
+    save_interval: int = 10
 
 
 @dataclass
-class FusionConfig:
-    """Configuration for multimodal fusion."""
-
-    fusion_method: Literal["concat", "weighted", "average"] = "concat"
-
-    # Weighted fusion parameters
-    visible_weight: float = 0.6
-    ir_weight: float = 0.4
-
-    # Fusion output dimension
-    fused_dim: int = 4096  # 2048 + 2048 for concatenation
-
-    # Feature normalization
-    normalize_features: bool = True  # L2-normalize before fusion
+class CalibrationConfig:
+    """Configuration for anomaly calibration."""
+    
+    # Threshold method
+    k_std: float = 3.0  # Number of standard deviations
+    percentile: float = 95.0  # Percentile threshold
+    
+    # Calibration file
+    calibration_path: str = "checkpoints/calibration.json"
 
 
 @dataclass
-class AnomalyConfig:
-    """Configuration for anomaly detection."""
+class InferenceConfig:
+    """Configuration for inference."""
     
-    # Anomaly scoring method
-    scoring_method: Literal["distance", "reconstruction"] = "distance"
+    # Temporal smoothing
+    smoothing_window: int = 10
+    smoothing_method: str = "moving_average"  # "moving_average" or "exponential"
+    ema_alpha: float = 0.3
     
-    # Distance-based scoring parameters
-    reference_features_path: str = None  # Path to saved reference features
-    distance_metric: Literal["euclidean", "cosine"] = "euclidean"
+    # Segmentation
+    yolo_model_path: str = "yolov8n-seg.pt"
     
-    # Thresholds
-    anomaly_threshold: float = 0.65
-    min_confidence: float = 0.5
-    
-    # Adaptive threshold
-    adaptive_threshold: bool = False
-    threshold_window: int = 100
-    
-    # Calibration settings
-    calibration_window_size: int = 100  # Number of frames for calibration
-    auto_calibrate: bool = True  # Auto-start calibration on first frames
-
-
-@dataclass
-class TemporalConfig:
-    """Configuration for temporal smoothing."""
-
-    # Smoothing method
-    smoothing_method: Literal["moving_average", "exponential", "consecutive"] = "moving_average"
-
-    # Window parameters
-    window_size: int = 10
-    consecutive_frames: int = 3
-
-    # Exponential smoothing
-    alpha: float = 0.3  # Smoothing factor for exponential smoothing
-
-    # Decision threshold for final anomaly decision
-    decision_threshold: float = 0.5
-
-
-@dataclass
-class UIConfig:
-    """Configuration for Streamlit UI."""
-    
-    # Display settings
-    display_fps: bool = True
-    display_frame_number: bool = True
-    display_object_count: bool = True
-    
-    # Visualization
-    show_bounding_boxes: bool = True
-    show_anomaly_score: bool = True
-    show_ir_frame: bool = True
-    
-    # Alert settings
-    alert_display_frames: int = 5
+    # Checkpoint
+    checkpoint_path: str = "checkpoints/best_model.pth"
 
 
 @dataclass
@@ -132,11 +87,9 @@ class SystemConfig:
     """Main configuration class combining all sub-configurations."""
     
     model: ModelConfig = ModelConfig()
-    preprocessing: PreprocessingConfig = PreprocessingConfig()
-    fusion: FusionConfig = FusionConfig()
-    anomaly: AnomalyConfig = AnomalyConfig()
-    temporal: TemporalConfig = TemporalConfig()
-    ui: UIConfig = UIConfig()
+    training: TrainingConfig = TrainingConfig()
+    calibration: CalibrationConfig = CalibrationConfig()
+    inference: InferenceConfig = InferenceConfig()
     
     # System settings
     debug_mode: bool = False

@@ -1,185 +1,132 @@
 """
-Multimodal fusion module for combining visible and IR features.
+Modality-aware fusion module for RGB and IR features.
 
-This module implements various fusion strategies to combine features from
-visible and IR encoders for anomaly detection.
+Supports RGB+IR, RGB-only, and IR-only modes with learnable fusion.
 """
 
+import torch
+import torch.nn as nn
 import numpy as np
-from typing import Literal, Optional
+from typing import Optional, Tuple
 import logging
 
 logger = logging.getLogger(__name__)
 
 
-class MultimodalFusion:
+class ModalityAwareFusion(nn.Module):
     """
-    Multimodal fusion for combining visible and IR features.
-    
-    Supports multiple fusion strategies:
-    - concat: Concatenate feature vectors
-    - weighted: Weighted sum of features
-    - average: Simple average of features
+    Modality-aware fusion for RGB and IR features.
+
+    Supports:
+    - RGB + IR: Both modalities contribute
+    - RGB only: RGB embedding dominates
+    - IR only: IR embedding dominates
+
+    Uses learnable projections and gated fusion.
+    Output dimension is fixed (512-D) regardless of missing modalities.
     """
-    
+
     def __init__(self,
-                 method: Literal["concat", "weighted", "average"] = "concat",
-                 visible_weight: float = 0.6,
-                 ir_weight: float = 0.4):
+                 input_dim: int = 2048,
+                 hidden_dim: int = 256,
+                 output_dim: int = 512):
         """
-        Initialize fusion module.
-        
+        Initialize modality-aware fusion.
+
         Args:
-            method: Fusion method ('concat', 'weighted', or 'average')
-            visible_weight: Weight for visible features (for weighted fusion)
-            ir_weight: Weight for IR features (for weighted fusion)
+            input_dim: Input feature dimension (2048 for ResNet50)
+            hidden_dim: Hidden dimension for projections
+            output_dim: Output fusion dimension (512)
         """
-        self.method = method
-        self.visible_weight = visible_weight
-        self.ir_weight = ir_weight
-        
-        if method == "weighted":
-            # Normalize weights
-            total = visible_weight + ir_weight
-            self.visible_weight /= total
-            self.ir_weight /= total
-        
-        logger.info(f"Fusion method: {method}")
-        if method == "weighted":
-            logger.info(f"Visible weight: {self.visible_weight:.2f}, IR weight: {self.ir_weight:.2f}")
-    
-    def fuse(self,
-             visible_features: np.ndarray,
-             ir_features: Optional[np.ndarray] = None,
-             normalize: bool = True) -> np.ndarray:
+        super().__init__()
+
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.output_dim = output_dim
+
+        # Projections for each modality
+        self.rgb_projection = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.LayerNorm(hidden_dim)
+        )
+
+        self.ir_projection = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.LayerNorm(hidden_dim)
+        )
+
+        # Fusion to output dimension
+        self.fusion_layer = nn.Sequential(
+            nn.Linear(hidden_dim * 2, output_dim),
+            nn.ReLU(),
+            nn.LayerNorm(output_dim)
+        )
+
+        # Single-modality adaptation layers
+        self.rgb_adapt = nn.Sequential(
+            nn.Linear(hidden_dim, output_dim),
+            nn.ReLU(),
+            nn.LayerNorm(output_dim)
+        )
+
+        self.ir_adapt = nn.Sequential(
+            nn.Linear(hidden_dim, output_dim),
+            nn.ReLU(),
+            nn.LayerNorm(output_dim)
+        )
+
+        logger.info(f"Modality-aware fusion: input={input_dim}, hidden={hidden_dim}, output={output_dim}")
+
+    def forward(self,
+                rgb_features: torch.Tensor,
+                ir_features: Optional[torch.Tensor] = None,
+                rgb_available: bool = True,
+                ir_available: bool = True) -> torch.Tensor:
         """
-        Fuse visible and IR features.
-        
+        Fuse RGB and IR features with modality awareness.
+
         Args:
-            visible_features: Visible feature vector (2048,)
-            ir_features: IR feature vector (2048,) or None if IR unavailable
-            normalize: Whether to L2-normalize features before fusion
-        
+            rgb_features: RGB features (B, 2048)
+            ir_features: IR features (B, 2048) or None
+            rgb_available: Whether RGB modality is available
+            ir_available: Whether IR modality is available
+
         Returns:
-            Fused feature vector
-        
-        Mathematical formulation:
-        
-        For concatenation:
-            F_fused = concat(F_visible, F_IR)
-            Dimension: 2048 + 2048 = 4096
-        
-        For weighted fusion:
-            F_fused = alpha * F_visible + beta * F_IR
-            Dimension: 2048
-        
-        For average fusion:
-            F_fused = (F_visible + F_IR) / 2
-            Dimension: 2048
-        
-        Note: Features are L2-normalized before fusion to ensure numerical
-        comparability between modalities, especially for weighted/average fusion.
+            Fused features (B, 512)
         """
-        if ir_features is None:
-            logger.warning("IR features unavailable, using visible only")
-            return visible_features
-        
-        # Normalize features if requested (important for weighted/average fusion)
-        if normalize:
-            visible_features = self._l2_normalize(visible_features)
-            ir_features = self._l2_normalize(ir_features)
-        
-        if self.method == "concat":
-            # Concatenate features
-            fused = np.concatenate([visible_features, ir_features])
-            logger.debug(f"Fused shape (concat): {fused.shape}")
-        
-        elif self.method == "weighted":
-            # Weighted sum
-            fused = (self.visible_weight * visible_features +
-                    self.ir_weight * ir_features)
-            logger.debug(f"Fused shape (weighted): {fused.shape}")
-        
-        elif self.method == "average":
-            # Simple average
-            fused = (visible_features + ir_features) / 2.0
-            logger.debug(f"Fused shape (average): {fused.shape}")
-        
+        # Project RGB features
+        if rgb_available:
+            rgb_embed = self.rgb_projection(rgb_features)
         else:
-            raise ValueError(f"Unknown fusion method: {self.method}")
-        
-        return fused
-    
-    def _l2_normalize(self, features: np.ndarray) -> np.ndarray:
-        """
-        L2-normalize feature vector.
-        
-        Args:
-            features: Feature vector
-        
-        Returns:
-            L2-normalized feature vector
-        """
-        norm = np.linalg.norm(features)
-        if norm > 1e-8:
-            return features / norm
-        return features
-    
-    def get_output_dim(self, visible_dim: int, ir_dim: int) -> int:
-        """
-        Get output dimension based on fusion method.
-        
-        Args:
-            visible_dim: Visible feature dimension
-            ir_dim: IR feature dimension
-        
-        Returns:
-            Output dimension after fusion
-        """
-        if self.method == "concat":
-            return visible_dim + ir_dim
+            # Zero embedding if unavailable
+            rgb_embed = torch.zeros(rgb_features.shape[0], self.hidden_dim, device=rgb_features.device)
+
+        # Project IR features
+        if ir_available and ir_features is not None:
+            ir_embed = self.ir_projection(ir_features)
         else:
-            # weighted and average preserve dimension
-            return visible_dim
+            # Zero embedding if unavailable
+            ir_embed = torch.zeros(rgb_features.shape[0], self.hidden_dim, device=rgb_features.device)
 
+        # Fusion based on availability
+        if rgb_available and ir_available:
+            # Both modalities: concatenate and fuse
+            combined = torch.cat([rgb_embed, ir_embed], dim=1)
+            fused = self.fusion_layer(combined)
+        elif rgb_available:
+            # RGB only: adapt RGB embedding
+            fused = self.rgb_adapt(rgb_embed)
+        elif ir_available:
+            # IR only: adapt IR embedding
+            fused = self.ir_adapt(ir_embed)
+        else:
+            # Neither available: return zeros
+            fused = torch.zeros(rgb_features.shape[0], self.output_dim, device=rgb_features.device)
 
-class LateFusion(MultimodalFusion):
-    """
-    Late fusion at feature level.
-    
-    Combines features after individual encoding.
-    """
-    
-    def __init__(self, method: Literal["concat", "weighted", "average"] = "concat"):
-        super().__init__(method)
-        logger.info("Late fusion initialized")
-
-
-class EarlyFusion:
-    """
-    Early fusion at input level.
-    
-    Combines visible and IR frames before feature extraction.
-    This is not currently used but provided for completeness.
-    """
-    
-    def __init__(self):
-        logger.info("Early fusion initialized")
-    
-    def fuse_frames(self,
-                   visible_frame: np.ndarray,
-                   ir_frame: np.ndarray) -> np.ndarray:
-        """
-        Fuse visible and IR frames at input level.
-        
-        Args:
-            visible_frame: Visible frame (H, W, 3)
-            ir_frame: IR frame (H, W, 3) after conversion
-        
-        Returns:
-            Fused frame (H, W, 6) - concatenated channels
-        """
-        # Concatenate along channel dimension
-        fused = np.concatenate([visible_frame, ir_frame], axis=2)
-        logger.debug(f"Fused frame shape: {fused.shape}")
         return fused
+
+    def get_output_dim(self) -> int:
+        """Get output dimension."""
+        return self.output_dim

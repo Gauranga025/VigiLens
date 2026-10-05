@@ -25,6 +25,7 @@ env/
 ENV/
 env.bak/
 venv.bak/
+env/
 
 # IDE/editor
 .idea/
@@ -108,7 +109,6 @@ outputs/
 output/
 runs/
 experiments/
-checkpoints/
 artifacts/
 tmp/
 temp/
@@ -175,6 +175,6 @@ docker-compose.override.yml
 training.npy
 *.mat
 *.csv
-*.json
+!checkpoints/calibration.json
 !requirements.txt
 !package.json

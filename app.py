@@ -3,6 +3,13 @@ VigiLens Streamlit Application - Multimodal Anomaly Detection
 
 This application provides a web interface for the VigiLens multimodal
 anomaly detection system using visible and IR/thermal video inputs.
+
+Architecture:
+- YOLO segmentation for pedestrian ROI
+- ResNet50 feature extraction (RGB + IR)
+- Modality-aware fusion (supports missing modalities)
+- Causal streaming LSTM for temporal modeling
+- Next-feature prediction for anomaly detection
 """
 
 import streamlit as st
@@ -11,10 +18,14 @@ import numpy as np
 import tempfile
 from pathlib import Path
 from collections import deque
+import json
 
 from config.config import SystemConfig, get_config
-from pipeline.multimodal_pipeline import MultimodalAnomalyPipeline
-from ultralytics import YOLO
+from pipeline.frame_source import create_frame_source
+from pipeline.inference import InferencePipeline
+from models.anomaly_model import VigiLensModel
+from models.segmentation import YOLOSegmentation
+from training.calibration import AnomalyCalibrator
 
 # ------------------ CONFIG ------------------
 st.set_page_config(page_title="VigiLens", layout="wide")
@@ -56,34 +67,26 @@ st.sidebar.header("System Configuration")
 st.sidebar.subheader("Processing")
 device = st.sidebar.selectbox("Device", ["cuda", "cpu"])
 
-# Anomaly detection settings
-st.sidebar.subheader("Anomaly Detection")
-anomaly_threshold = st.sidebar.slider("Anomaly Threshold", 0.0, 1.0, 0.65, 0.05)
-distance_metric = st.sidebar.selectbox("Distance Metric", ["euclidean", "cosine"])
-adaptive_threshold = st.sidebar.checkbox("Adaptive Threshold", value=False)
+# Model settings
+st.sidebar.subheader("Model")
+checkpoint_path = st.sidebar.text_input("Checkpoint Path", "checkpoints/best_model.pth")
+calibration_path = st.sidebar.text_input("Calibration Path", "checkpoints/calibration.json")
 
 # Temporal smoothing
 st.sidebar.subheader("Temporal Smoothing")
-smoothing_method = st.sidebar.selectbox("Smoothing Method", ["moving_average", "exponential", "consecutive"])
+smoothing_method = st.sidebar.selectbox("Smoothing Method", ["moving_average", "exponential"])
 window_size = st.sidebar.slider("Window Size", 1, 30, 10)
-consecutive_frames = st.sidebar.slider("Consecutive Frames", 1, 10, 3)
-
-# Calibration
-st.sidebar.subheader("Calibration")
-calibration_frames = st.sidebar.slider("Calibration Frames", 10, 200, 100, 10)
-auto_calibrate = st.sidebar.checkbox("Auto-Calibrate on Start", value=True)
-reset_calibration = st.sidebar.button("Reset Calibration")
 
 # Display settings
 st.sidebar.subheader("Display")
 show_ir = st.sidebar.checkbox("Show IR Frame", value=True)
-show_bboxes = st.sidebar.checkbox("Show Object Bounding Boxes", value=True)
+show_mask = st.sidebar.checkbox("Show Segmentation Mask", value=False)
 
 st.sidebar.markdown("---")
-st.sidebar.text("Model: ResNet50 (Pretrained)")
-st.sidebar.text("Method: Distance-based Scoring")
-st.sidebar.text("Fusion: Concatenation")
-st.sidebar.text("No training required")
+st.sidebar.text("Model: ResNet50 + LSTM")
+st.sidebar.text("Method: Next-feature prediction")
+st.sidebar.text("Training: Normal-only")
+st.sidebar.text("Fusion: Modality-aware")
 
 # ------------------ FILE INPUT ------------------
 st.subheader("Input Sources")
@@ -98,20 +101,6 @@ with col_ir:
 
 # ------------------ MAIN DASHBOARD ------------------
 if visible_file:
-    # Update config
-    config = get_config()
-    config.model.device = device
-    config.anomaly.anomaly_threshold = anomaly_threshold
-    config.anomaly.distance_metric = distance_metric
-    config.anomaly.adaptive_threshold = adaptive_threshold
-    config.anomaly.calibration_window_size = calibration_frames
-    config.anomaly.auto_calibrate = auto_calibrate
-    config.temporal.smoothing_method = smoothing_method
-    config.temporal.window_size = window_size
-    config.temporal.consecutive_frames = consecutive_frames
-    # Fusion is fixed to concatenation in Phase 1
-    config.fusion.fusion_method = "concat"
-
     # Save uploaded files
     visible_path = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
     visible_path.write(visible_file.read())
@@ -127,11 +116,39 @@ if visible_file:
     # Initialize pipeline
     try:
         with st.spinner("Initializing models..."):
-            pipeline = MultimodalAnomalyPipeline(config)
-            pipeline.load_source(visible_path.name, ir_path.name if ir_path else None)
+            # Load configuration
+            config = get_config()
+            config.model.device = device
 
-            # Load YOLO for object detection (auxiliary)
-            yolo_model = YOLO("yolov8n.pt")
+            # Load model
+            model = VigiLensModel(device=device)
+            if Path(checkpoint_path).exists():
+                model.load_checkpoint(checkpoint_path)
+            else:
+                st.warning(f"Checkpoint not found: {checkpoint_path}. Using untrained model.")
+
+            # Load calibration
+            calibration_info = None
+            if Path(calibration_path).exists():
+                calibration_info = AnomalyCalibrator.load_calibration(calibration_path)
+                st.info(f"Calibration loaded: threshold={calibration_info.get('threshold_std', 0.5):.4f}")
+            else:
+                st.warning(f"Calibration not found: {calibration_path}. Using default threshold.")
+
+            # Initialize segmentation
+            segmentation = YOLOSegmentation(device=device)
+
+            # Initialize inference pipeline
+            pipeline = InferencePipeline(
+                model=model,
+                segmentation=segmentation,
+                calibration_info=calibration_info,
+                smoothing_window=window_size,
+                smoothing_method=smoothing_method
+            )
+
+            # Load frame source
+            frame_source = create_frame_source(visible_path.name, ir_path.name if ir_path else None)
 
         st.success("Pipeline initialized successfully")
 
@@ -141,6 +158,7 @@ if visible_file:
         with col_video:
             video_placeholder = st.empty()
             ir_placeholder = st.empty() if show_ir and ir_path else None
+            mask_placeholder = st.empty() if show_mask else None
 
         with col_metrics:
             st.subheader("Metrics")
@@ -149,26 +167,19 @@ if visible_file:
             m_fps = st.empty()
             m_frame = st.empty()
             m_ir = st.empty()
-            m_calibration = st.empty()
 
             st.markdown("---")
-            st.subheader("Objects")
-            m_objects = st.empty()
+            st.subheader("Info")
+            m_threshold = st.empty()
 
         status_box = st.empty()
-        calibration_box = st.empty()
 
         # Process video
         frame_count = 0
         score_history = deque(maxlen=50)
 
-        # Handle reset calibration button
-        if reset_calibration:
-            pipeline.reset()
-            st.success("Calibration reset - starting new calibration phase")
-
         while True:
-            visible_frame, ir_frame = pipeline.frame_source.read()
+            visible_frame, ir_frame = frame_source.read()
 
             if visible_frame is None:
                 break
@@ -176,15 +187,8 @@ if visible_file:
             # Process frame
             result = pipeline.process_frame(visible_frame, ir_frame)
 
-            # YOLO detection (auxiliary)
-            yolo_results = yolo_model(visible_frame)
-            object_count = len(yolo_results[0].boxes)
-
-            # Draw bounding boxes if enabled
-            if show_bboxes:
-                for box in yolo_results[0].boxes:
-                    x1, y1, x2, y2 = map(int, box.xyxy[0])
-                    cv2.rectangle(visible_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            # Get segmentation mask for visualization
+            mask = segmentation.extract_person_mask(visible_frame)
 
             # Draw anomaly indicator
             if result['is_anomalous']:
@@ -193,20 +197,17 @@ if visible_file:
                 cv2.putText(visible_frame, f"Score: {result['smoothed_score']:.3f}", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
 
             # Update metrics
-            m_score.metric("Anomaly Score", f"{result['smoothed_score']:.3f}")
+            m_score.metric("Anomaly Score", f"{result['smoothed_score']:.4f}")
             m_status.metric("Status", "ANOMALY" if result['is_anomalous'] else "NORMAL")
             m_fps.metric("FPS", f"{1.0/result['inference_time']:.1f}")
             m_frame.metric("Frame", frame_count)
             m_ir.metric("IR Available", "Yes" if result['ir_available'] else "No")
-            m_calibration.metric("Mode", "CALIBRATING" if result['calibration_mode'] else "INFERENCE")
-            m_objects.metric("Objects", object_count)
+
+            if calibration_info:
+                threshold = calibration_info.get('threshold_std', 0.5)
+                m_threshold.metric("Threshold", f"{threshold:.4f}")
 
             # Update status box
-            if result['calibration_mode']:
-                calibration_box.info("CALIBRATING...")
-            else:
-                calibration_box.empty()
-
             if result['is_anomalous']:
                 status_box.error("ANOMALY DETECTED")
             else:
@@ -222,11 +223,17 @@ if visible_file:
                     ir_display = cv2.cvtColor(ir_display, cv2.COLOR_GRAY2RGB)
                 ir_placeholder.image(ir_display, channels="RGB")
 
+            if mask_placeholder and mask is not None:
+                mask_display = cv2.resize(mask, (720, 480))
+                mask_display = cv2.cvtColor(mask_display, cv2.COLOR_GRAY2RGB)
+                mask_placeholder.image(mask_display, channels="RGB")
+
             frame_count += 1
             score_history.append(result['smoothed_score'])
 
         # Cleanup
-        pipeline.frame_source.release()
+        frame_source.release()
+        pipeline.reset_stream()
         Path(visible_path.name).unlink(missing_ok=True)
         if ir_path:
             Path(ir_path.name).unlink(missing_ok=True)

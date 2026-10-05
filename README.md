@@ -1,118 +1,129 @@
-# VigiLens: Multi-Modal Video Anomaly Detection using Spatio-Temporal Deep Learning
+# VigiLens: Multimodal Anomaly Detection with Causal Streaming LSTM
 
 ---
 
 ## 📌 Overview
 
-VigiLens is a deep learning-based video anomaly detection system designed to identify abnormal events in surveillance footage by modeling both **spatial** and **temporal** patterns.
-
-Unlike traditional motion-based systems, VigiLens learns **normal behavioral dynamics** from video sequences and detects anomalies as deviations from learned patterns.
+VigiLens is a deep learning-based video anomaly detection system that learns **normal pedestrian behavior** and detects anomalies as deviations from learned temporal dynamics.
 
 ### 🔗 Core Components:
 
-* 🧠 Spatio-temporal modeling (ConvLSTM + Conv3D)
-* 🔁 Reconstruction-based anomaly detection
-* 🎯 Object-level segmentation (YOLOv8)
-* 🌗 Multi-modal fusion (Visible + Infrared) *(in progress)*
+* 🎯 YOLO segmentation for pedestrian ROI extraction
+* 🧠 ResNet50 feature extraction (RGB + IR)
+* 🌗 Modality-aware fusion (supports RGB+IR, RGB-only, IR-only)
+* ⏱️ Causal streaming LSTM for temporal modeling
+* 🔮 Next-feature prediction for anomaly detection
+* 📊 Statistical calibration for anomaly thresholding
 
 ---
 
-## 🎯 Motivation
+## 🎯 Architecture
 
-Traditional surveillance systems rely on handcrafted rules or simple motion detection, which often fail in complex real-world scenarios.
+### Pipeline
 
-This project addresses these limitations by:
-
-* ✅ Learning normal scene behavior automatically
-* ✅ Detecting subtle anomalies beyond motion
-* ✅ Improving robustness under low-light & noisy conditions
+```text
+RGB frame
+    ↓
+YOLO Segmentation
+    ↓
+RGB ROI / mask
+    ↓
+RGB ResNet50 feature extractor
+    ↓
+2048-D RGB feature
+    |
+    |                         IR frame
+    |                            ↓
+    |                  RGB-derived aligned ROI/mask
+    |                            ↓
+    |                  IR preprocessing
+    |                            ↓
+    |                  IR ResNet50 feature extractor
+    |                            ↓
+    |                         2048-D
+    |                            |
+    +-------------+--------------+
+                  |
+                  v
+        Modality-aware fusion
+                  |
+                  v
+              512-D feature
+                  |
+                  v
+       Causal streaming LSTM
+                  |
+                  v
+        Normal next-feature
+           prediction head
+                  |
+                  v
+        Predicted next feature
+                  |
+                  v
+Compare predicted feature with
+actual next feature
+                  |
+                  v
+          Prediction error
+                  |
+                  v
+       Calibrated anomaly score
+                  |
+                  v
+        Normal / Anomaly
+```
 
 ---
 
 ## ⚙️ Methodology
 
-### 1️⃣ Spatio-Temporal Modeling
+### 1️⃣ YOLO Segmentation
 
-* Uses **ConvLSTM architecture**
-* Captures:
+* Uses **YOLOv8n-seg** for instance segmentation
+* Focuses on **person/pedestrian class**
+* Policy: Combine all detected pedestrian masks into one ROI
+* Provides segmentation mask for feature extraction ROI
 
-  * Spatial features (objects, scene layout)
-  * Temporal dynamics (motion & behavior evolution)
+### 2️⃣ Feature Extraction
 
-📌 Processes sequences of **10 frames** to model temporal continuity.
+* **RGB**: ResNet50 (ImageNet pretrained) → 2048-D features
+* **IR**: ResNet50 (ImageNet pretrained) → 2048-D features
+  * IR frames converted to 3-channel for RGB encoder
+  * **Limitation**: Encoder not trained on thermal data
+* Both extractors support ROI-based extraction using segmentation masks
 
----
+### 3️⃣ Modality-Aware Fusion
 
-### 2️⃣ Reconstruction-Based Anomaly Detection
+* Learnable projections for RGB and IR features
+* Supports three modes:
+  * **RGB + IR**: Both modalities contribute
+  * **RGB only**: RGB embedding dominates
+  * **IR only**: IR embedding dominates
+* Fixed output dimension: 512-D (regardless of missing modalities)
+* Uses zero embeddings for unavailable modalities
 
-* Trained **only on normal data**
-* During inference:
+### 4️⃣ Causal Streaming LSTM
 
-  * Reconstructs input sequence
-  * Computes reconstruction error (MSE)
+* **2-layer unidirectional LSTM**
+* Input size: 512, Hidden size: 256, Dropout: 0.2
+* **Stateful streaming inference**: Hidden state persists across frames
+* **No future frames**: Causal behavior for real-time processing
+* Hidden state reset when new stream/video/session begins
 
-📊 **Decision Rule:**
+### 5️⃣ Next-Feature Prediction
 
-* Low error → Normal
-* High error → Anomaly
+* LSTM hidden state → prediction head → predicted next 512-D feature
+* **Training objective**: Predict next feature from current feature
+* **Loss**: Smooth L1 (robust to outliers)
+* **Normal-only training**: Model learns normal temporal dynamics
 
-✔ No labeled anomaly data required
+### 6️⃣ Anomaly Detection
 
----
-
-### 3️⃣ Object-Level Segmentation
-
-* Uses **YOLOv8**
-* Detects:
-
-  * People
-  * Vehicles
-* Focuses on **Regions of Interest (ROI)**
-
-🎯 Result:
-
-* Reduced noise
-* Improved detection accuracy
-
----
-
-### 4️⃣ Multi-Modal Fusion *(Ongoing)*
-
-* Inputs:
-
-  * RGB (Visible)
-  * Infrared (IR)
-
-📈 Benefits:
-
-* Better performance in low-light
-* Robust feature representation
-
----
-
-## 🔄 System Pipeline
-
-```text
-Video Input
-   ↓
-Frame Extraction & Preprocessing
-   ↓
-Segmentation (YOLOv8)
-   ↓
-Fusion (Visible + IR)
-   ↓
-Sequence Formation (10 frames)
-   ↓
-ConvLSTM Model
-   ↓
-Reconstruction
-   ↓
-Error Calculation (MSE)
-   ↓
-Thresholding
-   ↓
-Anomaly Detection
-```
+* **Anomaly score = prediction error** (distance between predicted and actual next feature)
+* Normal behavior: Low prediction error
+* Abnormal behavior: High prediction error (deviates from learned normal dynamics)
+* **Calibration**: Threshold set from normal validation data (mean + k*std)
 
 ---
 
@@ -122,112 +133,156 @@ Anomaly Detection
 VigiLens/
 │
 ├── models/
-│   ├── fusion_model.py
-│   ├── anomaly_model.py
+│   ├── segmentation.py       # YOLO segmentation
+│   ├── feature_extractor.py  # ResNet50 RGB/IR extractors
+│   ├── fusion.py              # Modality-aware fusion
+│   ├── temporal_lstm.py       # Causal streaming LSTM
+│   └── anomaly_model.py       # Top-level VigiLens model
 │
-├── utils/
-│   ├── preprocess.py
-│   ├── segmentation.py
+├── training/
+│   ├── dataset.py             # Normal-only video dataset
+│   ├── train.py               # Training loop
+│   ├── validate.py            # Validation
+│   └── calibration.py         # Anomaly calibration
 │
-├── vid2array.py
-├── train.py
-├── test.py
+├── pipeline/
+│   ├── frame_source.py        # Video frame reading
+│   ├── synchronization.py     # Frame synchronization
+│   ├── preprocessing.py       # Frame preprocessing
+│   └── inference.py           # Stateful inference pipeline
+│
+├── config/
+│   └── config.py              # System configuration
+│
+├── tests/
+│   ├── test_fusion.py         # Fusion tests
+│   ├── test_lstm.py           # LSTM tests
+│   ├── test_inference.py      # Inference tests
+│   ├── test_calibration.py    # Calibration tests
+│   ├── test_synchronization.py # Synchronization tests
+│   └── test_preprocessing.py  # Preprocessing tests
+│
+├── checkpoints/
+│   ├── best_model.pth         # Trained model checkpoint
+│   └── calibration.json       # Calibration statistics
+│
+├── app.py                     # Streamlit UI
 ├── requirements.txt
+├── Dockerfile
 └── README.md
 ```
 
 ---
 
-## 📊 Dataset
+## 🏋️ Training
 
-Used standard anomaly detection datasets:
+### Training Data
 
-* UCSD Pedestrian Dataset
-* Avenue Dataset
+* **Normal pedestrian behavior only**: walking, standing
+* No anomaly labels required
+* Split by VIDEO (not by frames) to avoid data leakage
 
-### 📌 Characteristics:
+### Training Command
 
-* Training → Only normal data
-* Testing → Normal + anomalies
+```bash
+python training/train.py
+```
+
+### Training Configuration
+
+* Sequence length: 16 frames
+* Batch size: 4
+* Learning rate: 1e-4
+* Optimizer: Adam
+* Loss: Smooth L1
+* Modality dropout: 15% RGB, 15% IR (for robustness)
 
 ---
 
-## 🏋️ Training Details
+## � Calibration
 
-* 📐 Input Shape: `(227 × 227 × 10 × 1)`
-* 📉 Loss Function: Mean Squared Error (MSE)
-* ⚡ Optimizer: Adam
-* 📦 Batch Size: 4
-* 🔁 Epochs: 20 (configurable)
+After training, calibrate anomaly threshold on held-out normal data:
 
-📌 Best model saved using checkpointing:
-
+```bash
+python training/calibration.py
 ```
-model/best_model.keras
-```
+
+Calibration computes:
+* Mean normal error
+* Standard deviation
+* Threshold: mean + k*std (default k=3)
+* Saves to `checkpoints/calibration.json`
 
 ---
 
-## ▶️ How to Run
+## ▶️ Inference
+
+### Streamlit UI
+
+```bash
+streamlit run app.py
+```
+
+The UI supports:
+* RGB + IR video upload
+* RGB-only mode
+* IR-only mode
+* Checkpoint and calibration loading
+* Real-time anomaly detection visualization
+
+### Inference Behavior
+
+* **Causal**: No future frames used
+* **One-frame latency**: Prediction error calculated when next frame arrives
+* **Stateful**: LSTM hidden state persists across frames
+* **Temporal smoothing**: Moving average or exponential smoothing
+* **Threshold decision**: Final anomaly decision based on calibrated threshold
+
+---
+
+## � Application Mode
+
+**Current implementation**: Uploaded video processing via Streamlit UI
+
+The architecture is designed for streaming but currently processes uploaded videos. Live camera support can be added by implementing a live `FrameSource`.
+
+---
+
+## 🚧 Limitations
+
+1. **IR Feature Extraction**: Uses RGB-pretrained ResNet50 (not thermal-specific)
+2. **Frame Synchronization**: Assumes temporal alignment at video start when timestamps unavailable
+3. **Calibration Quality**: Requires sufficient normal frames for calibration
+4. **Distance-Based Detection**: Simple prediction error may not capture complex patterns
+5. **IR Mask Alignment**: RGB-derived segmentation mask is resized to thermal frame resolution; true geometric camera calibration is not currently implemented
+
+---
+
+## � Future Work (Phase 2)
+
+* LLVIP pretrained model for IR-specific feature extraction
+* Pix2PixGAN for IR-to-visible translation
+* Trainable multimodal fusion layer
+* ConvLSTM or Transformer for temporal modeling
+* Training pipeline implementation
+* LLVIP dataset integration
+* Live camera support
+
+---
+
+## 📦 Requirements
 
 ```bash
 pip install -r requirements.txt
-python vid2array.py
-python train.py
-python test.py
 ```
 
----
-
-## 📈 Results & Observations
-
-⚠️ *Model training is currently in progress — final outputs will be added soon.*
-
-* ✔ Successfully distinguishes normal vs abnormal sequences
-* ✔ Reconstruction error acts as reliable anomaly signal
-* ✔ Temporal modeling improves performance significantly
-
----
-
-## 🚧 Current Status
-
-* ✅ ConvLSTM anomaly detection implemented
-* ✅ Training & inference pipeline completed
-* ✅ YOLOv8 segmentation integrated
-* 🚧 Multi-modal fusion under development
-* 🚧 Localization improvements in progress
-
----
-
-## 🔮 Future Work
-
-* 🔬 Multi-modal IR dataset training
-* 🧠 Attention-based fusion
-* 🔥 Pixel-level anomaly heatmaps
-* 🎥 Real-time webcam deployment
-* 📡 Edge device integration
-
----
-
-## 🧠 Key Learnings
-
-* Spatio-temporal modeling (ConvLSTM)
-* Unsupervised anomaly detection
-* Video preprocessing pipelines
-* Threshold tuning challenges
-* Multi-modal fusion techniques
-
----
-
-## 📌 Conclusion
-
-VigiLens demonstrates the effectiveness of combining deep learning, temporal modeling, and multi-modal perception for anomaly detection in surveillance systems.
-
-It lays a strong foundation for real-world applications in:
-
-* 🏙 Smart cities
-* 🔐 Security monitoring
-* 🎥 Intelligent surveillance
+Key dependencies:
+* torch >= 2.0.0
+* torchvision >= 0.15.0
+* ultralytics >= 8.0.0 (YOLO)
+* opencv-python >= 4.8.0
+* streamlit >= 1.28.0
+* tqdm >= 4.65.0
 
 ---
 
