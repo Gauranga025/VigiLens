@@ -1,325 +1,253 @@
-# VigiLens: Multimodal Anomaly Detection with Causal Streaming LSTM
+# VigiLens: Multimodal Anomaly Detection with a Causal Streaming LSTM
+
+VigiLens is a deep-learning video anomaly detection system for pedestrian scenes. It is trained **only on normal behavior** (walking, standing) and learns how pedestrian appearance evolves over time. At inference, anything the model cannot predict well, meaning a large gap between the predicted and the actual next-frame feature, is flagged as an anomaly.
+
+It works with paired **visible (RGB) + infrared/thermal (IR)** video, and also with RGB-only or IR-only input.
 
 ---
 
-## 📌 Overview
+## Table of Contents
 
-VigiLens is a deep learning-based video anomaly detection system that learns **normal pedestrian behavior** and detects anomalies as deviations from learned temporal dynamics.
-
-### 🔗 Core Components:
-
-* 🎯 YOLO segmentation for pedestrian ROI extraction
-* 🧠 ResNet50 feature extraction (RGB + IR)
-* 🌗 Modality-aware fusion (supports RGB+IR, RGB-only, IR-only)
-* ⏱️ Causal streaming LSTM for temporal modeling
-* 🔮 Next-feature prediction for anomaly detection
-* 📊 Statistical calibration for anomaly thresholding
+- [Key Features](#key-features)
+- [How It Works](#how-it-works)
+- [Project Structure](#project-structure)
+- [Getting Started](#getting-started)
+- [Training](#training)
+- [Calibration](#calibration)
+- [Running the Demo App](#running-the-demo-app)
+- [Docker](#docker)
+- [Testing](#testing)
+- [Limitations](#limitations)
+- [Roadmap](#roadmap)
 
 ---
 
-## 🎯 Architecture
+## Key Features
 
-### Pipeline
+- **Normal-only training.** No anomaly labels are required.
+- **Pedestrian-focused features.** YOLOv8n-seg masks restrict feature extraction to people.
+- **Modality-aware fusion.** RGB+IR, RGB-only and IR-only inputs all produce a fixed 512-D embedding. Missing modalities are replaced by zero embeddings.
+- **Causal, stateful inference.** A unidirectional LSTM keeps its hidden state across frames and never looks at future frames.
+- **Calibrated thresholds.** The anomaly threshold is derived from held-out normal data (`mean + k·std`).
+- **Streamlit UI.** Upload videos and watch the anomaly score, status and FPS update frame by frame.
 
-```text
-RGB frame
-    ↓
-YOLO Segmentation
-    ↓
-RGB ROI / mask
-    ↓
-RGB ResNet50 feature extractor
-    ↓
-2048-D RGB feature
-    |
-    |                         IR frame
-    |                            ↓
-    |                  RGB-derived aligned ROI/mask
-    |                            ↓
-    |                  IR preprocessing
-    |                            ↓
-    |                  IR ResNet50 feature extractor
-    |                            ↓
-    |                         2048-D
-    |                            |
-    +-------------+--------------+
-                  |
-                  v
-        Modality-aware fusion
-                  |
-                  v
-              512-D feature
-                  |
-                  v
-       Causal streaming LSTM
-                  |
-                  v
-        Normal next-feature
-           prediction head
-                  |
-                  v
-        Predicted next feature
-                  |
-                  v
-Compare predicted feature with
-actual next feature
-                  |
-                  v
-          Prediction error
-                  |
-                  v
-       Calibrated anomaly score
-                  |
-                  v
-        Normal / Anomaly
+---
+
+## How It Works
+
+```
+RGB frame ─► YOLOv8n-seg ─► person ROI/mask ─► ResNet50 (RGB) ─► 2048-D ─┐
+                                   │                                      │
+IR frame ───────────────► aligned ROI + IR preprocessing                  ├─► Modality-aware
+                                   └─► ResNet50 (IR) ───────► 2048-D ─────┘   fusion (512-D)
+                                                                                  │
+                                                                     Causal streaming LSTM
+                                                                                  │
+                                                                   Next-feature prediction head
+                                                                                  │
+                                         |predicted next feature − actual next feature|
+                                                                                  │
+                                              temporal smoothing ─► calibrated threshold
+                                                                                  │
+                                                                         Normal / Anomaly
 ```
 
----
+| Stage | Details |
+|---|---|
+| **Segmentation** | YOLOv8n-seg, person class only. All detected pedestrian masks are merged into a single ROI. |
+| **Feature extraction** | ImageNet-pretrained ResNet50 for each modality, giving 2048-D features. IR frames are converted to 3 channels. |
+| **Fusion** | Learnable projections per modality, fused to 512-D. Supports `RGB+IR`, `RGB only` and `IR only`. |
+| **Temporal model** | 2-layer unidirectional LSTM (input 512, hidden 256, dropout 0.2). The hidden state is reset at the start of each new stream. |
+| **Prediction** | The LSTM hidden state feeds a head that predicts the next 512-D feature. Trained with Smooth L1 loss. |
+| **Scoring** | Anomaly score = prediction error. Calibrated threshold = `mean + k·std` of errors on normal validation data (default `k = 3`). |
 
-## ⚙️ Methodology
-
-### 1️⃣ YOLO Segmentation
-
-* Uses **YOLOv8n-seg** for instance segmentation
-* Focuses on **person/pedestrian class**
-* Policy: Combine all detected pedestrian masks into one ROI
-* Provides segmentation mask for feature extraction ROI
-
-### 2️⃣ Feature Extraction
-
-* **RGB**: ResNet50 (ImageNet pretrained) → 2048-D features
-* **IR**: ResNet50 (ImageNet pretrained) → 2048-D features
-  * IR frames converted to 3-channel for RGB encoder
-  * **Limitation**: Encoder not trained on thermal data
-* Both extractors support ROI-based extraction using segmentation masks
-
-### 3️⃣ Modality-Aware Fusion
-
-* Learnable projections for RGB and IR features
-* Supports three modes:
-  * **RGB + IR**: Both modalities contribute
-  * **RGB only**: RGB embedding dominates
-  * **IR only**: IR embedding dominates
-* Fixed output dimension: 512-D (regardless of missing modalities)
-* Uses zero embeddings for unavailable modalities
-
-### 4️⃣ Causal Streaming LSTM
-
-* **2-layer unidirectional LSTM**
-* Input size: 512, Hidden size: 256, Dropout: 0.2
-* **Stateful streaming inference**: Hidden state persists across frames
-* **No future frames**: Causal behavior for real-time processing
-* Hidden state reset when new stream/video/session begins
-
-### 5️⃣ Next-Feature Prediction
-
-* LSTM hidden state → prediction head → predicted next 512-D feature
-* **Training objective**: Predict next feature from current feature
-* **Loss**: Smooth L1 (robust to outliers)
-* **Normal-only training**: Model learns normal temporal dynamics
-
-### 6️⃣ Anomaly Detection
-
-* **Anomaly score = prediction error** (distance between predicted and actual next feature)
-* Normal behavior: Low prediction error
-* Abnormal behavior: High prediction error (deviates from learned normal dynamics)
-* **Calibration**: Threshold set from normal validation data (mean + k*std)
+**Latency:** because the score compares a prediction with the *next* feature, each frame's error is available one frame later.
 
 ---
 
-## 📁 Project Structure
+## Project Structure
 
-```bash
+```
 VigiLens/
-│
-├── models/
-│   ├── segmentation.py       # YOLO segmentation
-│   ├── feature_extractor.py  # ResNet50 RGB/IR extractors
-│   ├── fusion.py              # Modality-aware fusion
-│   ├── temporal_lstm.py       # Causal streaming LSTM
-│   └── anomaly_model.py       # Top-level VigiLens model
-│
-├── training/
-│   ├── dataset.py             # Normal-only video dataset
-│   ├── train.py               # Training loop
-│   ├── validate.py            # Validation
-│   └── calibration.py         # Anomaly calibration
-│
-├── pipeline/
-│   ├── frame_source.py        # Video frame reading
-│   ├── synchronization.py     # Frame synchronization
-│   ├── preprocessing.py       # Frame preprocessing
-│   └── inference.py           # Stateful inference pipeline
-│
-├── config/
-│   └── config.py              # System configuration
-│
-├── tests/
-│   ├── test_fusion.py         # Fusion tests
-│   ├── test_lstm.py           # LSTM tests
-│   ├── test_inference.py      # Inference tests
-│   ├── test_calibration.py    # Calibration tests
-│   ├── test_synchronization.py # Synchronization tests
-│   └── test_preprocessing.py  # Preprocessing tests
-│
-├── checkpoints/
-│   ├── best_model.pth         # Trained model checkpoint
-│   └── calibration.json       # Calibration statistics
-│
-├── app.py                     # Streamlit UI
-├── requirements.txt
+├── app.py                   # Streamlit UI
 ├── Dockerfile
-└── README.md
+├── requirements.txt
+├── config/
+│   └── config.py            # System configuration (SystemConfig, get_config)
+├── models/
+│   ├── segmentation.py      # YOLO person segmentation
+│   ├── feature_extractor.py # ResNet50 RGB/IR extractors
+│   ├── fusion.py            # Modality-aware fusion
+│   ├── temporal_lstm.py     # Causal streaming LSTM
+│   └── anomaly_model.py     # Top-level VigiLensModel
+├── pipeline/
+│   ├── frame_source.py      # Video frame reading
+│   ├── synchronization.py   # RGB/IR frame synchronization
+│   ├── preprocessing.py     # Frame preprocessing
+│   └── inference.py         # Stateful InferencePipeline
+├── training/
+│   ├── dataset.py           # Normal-only paired-video dataset
+│   ├── train.py             # Training loop
+│   ├── validate.py          # Validation
+│   └── calibration.py       # AnomalyCalibrator
+├── tests/                   # Unit tests (fusion, LSTM, inference, calibration, sync, preprocessing)
+└── checkpoints/             # Created by you: best_model.pth, calibration.json (not tracked)
 ```
 
 ---
 
-## 🏋️ Training
+## Getting Started
 
-### Dataset Structure
+### Requirements
 
-Organize your training and validation videos as follows:
+- Python 3.8+ (PyTorch 2.x does not support older versions)
+- A CUDA-capable GPU is recommended; CPU works but is slow
+
+### Installation
 
 ```bash
+git clone https://github.com/Gauranga025/VigiLens.git
+cd VigiLens
+
+python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+
+pip install -r requirements.txt
+```
+
+Core dependencies: `torch`, `torchvision`, `ultralytics` (YOLO), `opencv-python`, `streamlit`, `numpy`, `pillow`, `tqdm`.
+
+> The repository does not include trained weights. Train a model and calibrate it (below) before running the app, otherwise the app falls back to an untrained model and a default threshold.
+
+---
+
+## Training
+
+### 1. Prepare the dataset
+
+Place paired RGB and IR videos under `Data/`:
+
+```
 Data/
 ├── train/
-│   ├── rgb/
-│   │   ├── scene001_rgb.mp4
-│   │   ├── scene002_rgb.mp4
-│   │   └── ...
-│   └── ir/
-│       ├── scene001_ir.mp4
-│       ├── scene002_ir.mp4
-│       └── ...
+│   ├── rgb/  scene001_rgb.mp4  scene002_rgb.mp4  ...
+│   └── ir/   scene001_ir.mp4   scene002_ir.mp4   ...
 └── val/
-    ├── rgb/
-    │   ├── scene010_rgb.mp4
-    │   └── ...
-    └── ir/
-        ├── scene010_ir.mp4
-        └── ...
+    ├── rgb/  scene010_rgb.mp4  ...
+    └── ir/   scene010_ir.mp4   ...
 ```
 
-**Important notes:**
-- RGB and IR videos are paired deterministically by **sorted list order**, not by filename
-- Use consistent naming (e.g., `scene001_rgb.mp4` pairs with `scene001_ir.mp4`) to avoid confusion
-- `train/` and `val/` directories represent the manual train/validation split
-- Training videos must contain **only normal pedestrian behavior** (walking, standing)
-- RGB and IR videos must be synchronized (same FPS and frame count)
-- Evaluation anomaly videos belong in `Evaluation/` and are not used during training/calibration
+Rules to follow:
 
-### Training Data
+- Videos must contain **normal behavior only** (e.g. walking, standing).
+- RGB and IR files are paired by **sorted order, not by filename**. Use matching, consistently sorted names.
+- Each RGB/IR pair must be synchronized, with the same FPS and frame count.
+- Split by **video**, not by frame, to avoid leakage between `train/` and `val/`.
+- Keep anomalous evaluation videos out of `train/` and `val/` (for example in a separate `Evaluation/` folder).
 
-* **Normal pedestrian behavior only**: walking, standing
-* No anomaly labels required
-* Split by VIDEO (not by frames) to avoid data leakage
-
-### Training Command
+### 2. Train
 
 ```bash
 python training/train.py
 ```
 
-The training script automatically discovers videos in `Data/train/` and `Data/val/`.
+The script discovers videos in `Data/train/` and `Data/val/` automatically.
 
-### Training Configuration
-
-* Sequence length: 16 frames
-* Batch size: 4 (configurable)
-* Learning rate: 1e-4
-* Optimizer: Adam
-* Loss: Smooth L1
-* Modality dropout: 15% RGB, 15% IR (for robustness)
+| Setting | Value |
+|---|---|
+| Sequence length | 16 frames |
+| Batch size | 4 (configurable) |
+| Optimizer / LR | Adam, 1e-4 |
+| Loss | Smooth L1 |
+| Modality dropout | 15% RGB, 15% IR (for robustness to missing modalities) |
 
 ---
 
-## � Calibration
+## Calibration
 
-After training, calibrate anomaly threshold on held-out normal data:
+After training, compute the anomaly threshold on held-out **normal** data:
 
 ```bash
 python training/calibration.py
 ```
 
-Calibration computes:
-* Mean normal error
-* Standard deviation
-* Threshold: mean + k*std (default k=3)
-* Saves to `checkpoints/calibration.json`
+This computes the mean and standard deviation of normal prediction errors, sets the threshold to `mean + k·std` (default `k = 3`), and writes the result to `checkpoints/calibration.json`.
 
 ---
 
-## ▶️ Inference
-
-### Streamlit UI
+## Running the Demo App
 
 ```bash
 streamlit run app.py
 ```
 
-The UI supports:
-* RGB + IR video upload
-* RGB-only mode
-* IR-only mode
-* Checkpoint and calibration loading
-* Real-time anomaly detection visualization
+Then open the URL Streamlit prints (by default <http://localhost:8501>).
 
-### Inference Behavior
+**Sidebar settings**
 
-* **Causal**: No future frames used
-* **One-frame latency**: Prediction error calculated when next frame arrives
-* **Stateful**: LSTM hidden state persists across frames
-* **Temporal smoothing**: Moving average or exponential smoothing
-* **Threshold decision**: Final anomaly decision based on calibrated threshold
+- **Device:** `cuda` or `cpu` (the default is `cuda`, so switch to `cpu` on machines without a GPU)
+- **Checkpoint / calibration paths:** default to `checkpoints/best_model.pth` and `checkpoints/calibration.json`
+- **Temporal smoothing:** `moving_average` or `exponential`, with a window of 1–30 frames
+- **Display:** toggle the IR view and the segmentation mask
 
----
+**Usage**
 
-## � Application Mode
+1. Upload a visible video (`mp4`, `avi` or `mov`). An IR/thermal video is optional.
+2. The app processes the video frame by frame. Anomalous frames get a red border and an `ANOMALY` label, and the sidebar panel shows the smoothed score, status, FPS, frame index and IR availability.
 
-**Current implementation**: Uploaded video processing via Streamlit UI
+If no IR video is uploaded, the app runs in visible-only mode.
 
-The architecture is designed for streaming but currently processes uploaded videos. Live camera support can be added by implementing a live `FrameSource`.
+> **Current scope:** the app processes *uploaded* videos. The architecture is built for streaming, and live camera support only requires a live `FrameSource` implementation.
 
 ---
 
-## 🚧 Limitations
-
-1. **IR Feature Extraction**: Uses RGB-pretrained ResNet50 (not thermal-specific)
-2. **Frame Synchronization**: Assumes temporal alignment at video start when timestamps unavailable
-3. **Calibration Quality**: Requires sufficient normal frames for calibration
-4. **Distance-Based Detection**: Simple prediction error may not capture complex patterns
-5. **IR Mask Alignment**: RGB-derived segmentation mask is resized to thermal frame resolution; true geometric camera calibration is not currently implemented
-
----
-
-## � Future Work (Phase 2)
-
-* LLVIP pretrained model for IR-specific feature extraction
-* Pix2PixGAN for IR-to-visible translation
-* Trainable multimodal fusion layer
-* ConvLSTM or Transformer for temporal modeling
-* Training pipeline implementation
-* LLVIP dataset integration
-* Live camera support
-
----
-
-## 📦 Requirements
+## Docker
 
 ```bash
-pip install -r requirements.txt
+docker build -t vigilens .
+docker run -p 8501:8501 vigilens
 ```
 
-Key dependencies:
-* torch >= 2.0.0
-* torchvision >= 0.15.0
-* ultralytics >= 8.0.0 (YOLO)
-* opencv-python >= 4.8.0
-* streamlit >= 1.28.0
-* tqdm >= 4.65.0
+Streamlit listens on port 8501 inside the container by default. To use the GPU, run with `--gpus all` (requires the NVIDIA Container Toolkit and a CUDA-enabled base image).
 
 ---
 
-## 📬 Contact
+## Testing
 
-For collaboration or queries, feel free to reach out.
+Unit tests live in `tests/` and cover fusion, the LSTM, inference, calibration, synchronization and preprocessing:
+
+```bash
+pip install pytest
+python -m pytest tests/
+```
+
+---
+
+## Limitations
+
+1. **IR features:** the IR encoder is an RGB/ImageNet-pretrained ResNet50, not trained on thermal data.
+2. **Synchronization:** when timestamps are unavailable, RGB and IR are assumed to be aligned at the start of the video.
+3. **IR mask alignment:** the RGB-derived mask is resized to the IR resolution. True geometric camera calibration is not implemented.
+4. **Calibration quality:** thresholds need enough normal frames to be reliable.
+5. **Scoring:** plain prediction error may miss subtle or complex anomalies.
+
+---
+
+## Roadmap
+
+- IR-specific feature extraction (e.g. LLVIP-pretrained model)
+- IR-to-visible translation (Pix2Pix GAN)
+- Trainable multimodal fusion improvements
+- ConvLSTM or Transformer temporal models
+- LLVIP dataset integration
+- Live camera support
+
+---
+
+## License
+
+No license file is currently included in this repository. Add one (e.g. MIT or Apache-2.0) before sharing or accepting contributions.
+
+## Contact
+
+For collaboration or questions, open an issue on [GitHub](https://github.com/Gauranga025/VigiLens/issues).
