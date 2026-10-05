@@ -176,6 +176,38 @@ VigiLens/
 
 ## 🏋️ Training
 
+### Dataset Structure
+
+Organize your training and validation videos as follows:
+
+```bash
+Data/
+├── train/
+│   ├── rgb/
+│   │   ├── scene001_rgb.mp4
+│   │   ├── scene002_rgb.mp4
+│   │   └── ...
+│   └── ir/
+│       ├── scene001_ir.mp4
+│       ├── scene002_ir.mp4
+│       └── ...
+└── val/
+    ├── rgb/
+    │   ├── scene010_rgb.mp4
+    │   └── ...
+    └── ir/
+        ├── scene010_ir.mp4
+        └── ...
+```
+
+**Important notes:**
+- RGB and IR videos are paired deterministically by **sorted list order**, not by filename
+- Use consistent naming (e.g., `scene001_rgb.mp4` pairs with `scene001_ir.mp4`) to avoid confusion
+- `train/` and `val/` directories represent the manual train/validation split
+- Training videos must contain **only normal pedestrian behavior** (walking, standing)
+- RGB and IR videos must be synchronized (same FPS and frame count)
+- Evaluation anomaly videos belong in `Evaluation/` and are not used during training/calibration
+
 ### Training Data
 
 * **Normal pedestrian behavior only**: walking, standing
@@ -188,10 +220,12 @@ VigiLens/
 python training/train.py
 ```
 
+The training script automatically discovers videos in `Data/train/` and `Data/val/`.
+
 ### Training Configuration
 
 * Sequence length: 16 frames
-* Batch size: 4
+* Batch size: 4 (configurable)
 * Learning rate: 1e-4
 * Optimizer: Adam
 * Loss: Smooth L1

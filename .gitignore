@@ -78,6 +78,7 @@ data/
 dataset/
 datasets/
 Data/
+Evaluation/
 *.mp4
 *.avi
 *.mov

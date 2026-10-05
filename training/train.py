@@ -291,8 +291,13 @@ def train(config: SystemConfig,
         # Save checkpoint
         if val_loss < best_val_loss:
             best_val_loss = val_loss
+            # Use sanity checkpoint name for 2-epoch runs
+            if num_epochs == 2:
+                checkpoint_name = "vigilens_sanity_epoch_2.pth"
+            else:
+                checkpoint_name = "best_model.pth"
             model.save_checkpoint(
-                str(checkpoint_path / "best_model.pth"),
+                str(checkpoint_path / checkpoint_name),
                 epoch,
                 val_loss,
                 config.__dict__
@@ -451,20 +456,140 @@ def validate(model: VigiLensModel,
     return avg_loss
 
 
+def get_repo_root() -> Path:
+    """Get repository root from the location of this script."""
+    return Path(__file__).parent.parent
+
+
+def discover_videos(data_dir: Path, split: str, modality: str) -> List[Path]:
+    """
+    Discover video files in dataset directory.
+
+    Args:
+        data_dir: Base data directory
+        split: 'train' or 'val'
+        modality: 'rgb' or 'ir'
+
+    Returns:
+        Sorted list of video paths
+    """
+    video_dir = data_dir / split / modality
+    if not video_dir.exists():
+        raise ValueError(f"Video directory not found: {video_dir}")
+
+    videos = sorted(video_dir.glob("*.mp4"))
+    if not videos:
+        raise ValueError(f"No .mp4 videos found in {video_dir}")
+
+    return videos
+
+
+def validate_dataset(train_rgb: List[Path],
+                    train_ir: List[Path],
+                    val_rgb: List[Path],
+                    val_ir: List[Path]) -> None:
+    """
+    Validate dataset structure and RGB/IR pairing.
+
+    Args:
+        train_rgb: Training RGB video paths
+        train_ir: Training IR video paths
+        val_rgb: Validation RGB video paths
+        val_ir: Validation IR video paths
+
+    Raises:
+        ValueError: If validation fails
+    """
+    # Check counts
+    if len(train_rgb) != len(train_ir):
+        raise ValueError(f"Train RGB count ({len(train_rgb)}) != Train IR count ({len(train_ir)})")
+
+    if len(val_rgb) != len(val_ir):
+        raise ValueError(f"Validation RGB count ({len(val_rgb)}) != Validation IR count ({len(val_ir)})")
+
+    # Check videos are readable
+    def check_readable(videos: List[Path], name: str):
+        for video in videos:
+            cap = cv2.VideoCapture(str(video))
+            if not cap.isOpened():
+                raise ValueError(f"Cannot open {name} video: {video}")
+            cap.release()
+
+    check_readable(train_rgb, "train RGB")
+    check_readable(train_ir, "train IR")
+    check_readable(val_rgb, "validation RGB")
+    check_readable(val_ir, "validation IR")
+
+    # Check FPS and frame count compatibility for paired videos
+    def check_compatibility(rgb_videos: List[Path], ir_videos: List[Path], split_name: str):
+        for rgb_path, ir_path in zip(rgb_videos, ir_videos):
+            cap_rgb = cv2.VideoCapture(str(rgb_path))
+            cap_ir = cv2.VideoCapture(str(ir_path))
+
+            rgb_fps = cap_rgb.get(cv2.CAP_PROP_FPS)
+            ir_fps = cap_ir.get(cv2.CAP_PROP_FPS)
+            rgb_frames = int(cap_rgb.get(cv2.CAP_PROP_FRAME_COUNT))
+            ir_frames = int(cap_ir.get(cv2.CAP_PROP_FRAME_COUNT))
+
+            cap_rgb.release()
+            cap_ir.release()
+
+            if abs(rgb_fps - ir_fps) > 0.1:
+                logger.warning(f"{split_name}: FPS mismatch - {rgb_path.name} ({rgb_fps:.2f} fps) vs {ir_path.name} ({ir_fps:.2f} fps)")
+
+            if rgb_frames != ir_frames:
+                logger.warning(f"{split_name}: Frame count mismatch - {rgb_path.name} ({rgb_frames} frames) vs {ir_path.name} ({ir_frames} frames)")
+
+    check_compatibility(train_rgb, train_ir, "train")
+    check_compatibility(val_rgb, val_ir, "validation")
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
-    # Example usage
+    # Get repository root
+    repo_root = get_repo_root()
+    data_dir = repo_root / "Data"
+
+    # Discover videos
+    train_rgb_videos = discover_videos(data_dir, "train", "rgb")
+    train_ir_videos = discover_videos(data_dir, "train", "ir")
+    val_rgb_videos = discover_videos(data_dir, "val", "rgb")
+    val_ir_videos = discover_videos(data_dir, "val", "ir")
+
+    # Validate dataset
+    validate_dataset(train_rgb_videos, train_ir_videos, val_rgb_videos, val_ir_videos)
+
+    # Load config
     config = SystemConfig()
 
-    # In real usage, provide actual video paths
-    train_videos = [Path("Data/train/rgb/video1.mp4")]
-    val_videos = [Path("Data/val/rgb/video1.mp4")]
+    # Override config for sanity run
+    config.training.num_epochs = 2
+    config.training.batch_size = 2
 
+    # Print training summary
+    print("\n" + "="*50)
+    print("VigiLens Training")
+    print("="*50)
+    print(f"Train RGB videos: {len(train_rgb_videos)}")
+    print(f"Train IR videos: {len(train_ir_videos)}")
+    print(f"Validation RGB videos: {len(val_rgb_videos)}")
+    print(f"Validation IR videos: {len(val_ir_videos)}")
+    print(f"\nSequence length: {config.training.sequence_length}")
+    print(f"Batch size: {config.training.batch_size}")
+    print(f"Epochs: {config.training.num_epochs}")
+    print(f"Learning rate: {config.training.learning_rate}")
+    print("="*50 + "\n")
+
+    # Train
     train(
         config=config,
-        train_videos=train_videos,
-        val_videos=val_videos,
-        num_epochs=10,
-        batch_size=2
+        train_videos=train_rgb_videos,
+        val_videos=val_rgb_videos,
+        train_ir_videos=train_ir_videos,
+        val_ir_videos=val_ir_videos,
+        num_epochs=config.training.num_epochs,
+        batch_size=config.training.batch_size,
+        learning_rate=config.training.learning_rate,
+        checkpoint_dir="checkpoints"
     )
