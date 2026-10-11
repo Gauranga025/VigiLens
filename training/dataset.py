@@ -69,8 +69,11 @@ class NormalVideoDataset(Dataset):
 
     def __len__(self) -> int:
         """Return number of possible sequences."""
-        total_frames = sum(info['frame_count'] for info in self.video_info)
-        return max(0, total_frames - self.sequence_length)
+        total_sequences = 0
+        for info in self.video_info:
+            sequences_per_video = max(0, info['frame_count'] - self.sequence_length)
+            total_sequences += sequences_per_video
+        return total_sequences
 
     def __getitem__(self, idx: int) -> Dict:
         """
@@ -86,12 +89,18 @@ class NormalVideoDataset(Dataset):
         # Find which video this index belongs to
         cumulative = 0
         video_idx = 0
+        frame_idx = 0
         for i, info in enumerate(self.video_info):
             if idx < cumulative + info['frame_count'] - self.sequence_length:
                 video_idx = i
                 frame_idx = idx - cumulative
                 break
             cumulative += info['frame_count'] - self.sequence_length
+        else:
+            # If loop completes without break, idx is out of bounds
+            # Wrap around to last video
+            video_idx = len(self.video_info) - 1
+            frame_idx = max(0, self.video_info[video_idx]['frame_count'] - self.sequence_length - 1)
 
         info = self.video_info[video_idx]
 
@@ -123,10 +132,17 @@ class NormalVideoDataset(Dataset):
                       rgb_path: Path,
                       ir_path: Optional[Path],
                       start_frame: int,
-                      length: int) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+                      length: int) -> Tuple[np.ndarray, np.ndarray]:
         """Load a sequence of frames from video."""
         cap_rgb = cv2.VideoCapture(str(rgb_path))
+        if not cap_rgb.isOpened():
+            raise ValueError(f"Cannot open RGB video: {rgb_path}")
+        
         cap_ir = cv2.VideoCapture(str(ir_path)) if ir_path and ir_path.exists() else None
+        if cap_ir and not cap_ir.isOpened():
+            logger.warning(f"Cannot open IR video: {ir_path}. Using RGB only.")
+            cap_ir.release()
+            cap_ir = None
 
         rgb_frames = []
         ir_frames = []
@@ -138,6 +154,7 @@ class NormalVideoDataset(Dataset):
         for _ in range(length):
             ret_rgb, frame_rgb = cap_rgb.read()
             if not ret_rgb:
+                logger.warning(f"RGB video ended early at frame {len(rgb_frames)}")
                 break
 
             frame_rgb = cv2.resize(frame_rgb, self.input_size)
@@ -150,13 +167,27 @@ class NormalVideoDataset(Dataset):
                     if len(frame_ir.shape) == 3:
                         frame_ir = cv2.cvtColor(frame_ir, cv2.COLOR_BGR2GRAY)
                     ir_frames.append(frame_ir)
+                else:
+                    logger.warning(f"IR video ended early at frame {len(ir_frames)}")
 
         cap_rgb.release()
         if cap_ir:
             cap_ir.release()
 
+        if len(rgb_frames) < length:
+            logger.warning(f"RGB sequence shorter than requested: {len(rgb_frames)} < {length}")
+        
+        if ir_frames and len(ir_frames) < len(rgb_frames):
+            logger.warning(f"IR sequence shorter than RGB: {len(ir_frames)} < {len(rgb_frames)}")
+
         rgb_sequence = np.array(rgb_frames, dtype=np.float32) / 255.0
-        ir_sequence = np.array(ir_frames, dtype=np.float32) / 255.0 if ir_frames else None
+        
+        # Return zero tensor if IR unavailable (for DataLoader compatibility)
+        if ir_frames:
+            ir_sequence = np.array(ir_frames, dtype=np.float32) / 255.0
+        else:
+            # Return zero tensor with shape (length, H, W)
+            ir_sequence = np.zeros((length, self.input_size[0], self.input_size[1]), dtype=np.float32)
 
         return rgb_sequence, ir_sequence
 

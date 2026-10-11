@@ -171,6 +171,19 @@ class VigiLensModel(nn.Module):
         self.previous_prediction = None
         logger.debug("Stream state reset")
 
+    def init_hidden(self, batch_size: int, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Initialize hidden state for temporal model.
+
+        Args:
+            batch_size: Batch size
+            device: Device for tensors
+
+        Returns:
+            Tuple of (h, c) initialized to zeros
+        """
+        return self.temporal.init_hidden(batch_size, device)
+
     def process_frame(self,
                      rgb_frame,
                      ir_frame=None,

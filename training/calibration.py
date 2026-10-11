@@ -213,6 +213,7 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
     from config.config import SystemConfig
+    from training.train import discover_videos, get_repo_root, pair_videos_by_sequence_id
 
     config = SystemConfig()
     device = config.model.device
@@ -221,9 +222,18 @@ if __name__ == "__main__":
     model = VigiLensModel(device=device).to(device)
     model.load_checkpoint("checkpoints/best_model.pth")
 
-    # Calibrate
-    val_videos = [Path("Data/val/rgb/video1.mp4")]
-    val_ir_videos = [Path("Data/val/ir/video1.mp4")]
+    # Discover validation videos
+    repo_root = get_repo_root()
+    data_dir = repo_root / "Data"
+    
+    val_rgb_videos = discover_videos(data_dir, "val", "rgb")
+    val_ir_videos = discover_videos(data_dir, "val", "ir")
+    
+    # Pair by sequence ID
+    val_pairs = pair_videos_by_sequence_id(val_rgb_videos, val_ir_videos)
+    val_rgb_videos = [p[0] for p in val_pairs]
+    val_ir_videos = [p[1] for p in val_pairs]
 
-    calibration_info = calibrate_model(model, val_videos, val_ir_videos, device)
+    # Calibrate
+    calibration_info = calibrate_model(model, val_rgb_videos, val_ir_videos, device)
     logger.info(f"Calibration complete: {calibration_info}")

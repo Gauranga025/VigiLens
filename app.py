@@ -19,6 +19,8 @@ import tempfile
 from pathlib import Path
 from collections import deque
 import json
+import torch
+import time
 
 from config.config import SystemConfig, get_config
 from pipeline.frame_source import create_frame_source
@@ -65,7 +67,15 @@ st.sidebar.header("System Configuration")
 
 # Processing settings
 st.sidebar.subheader("Processing")
-device = st.sidebar.selectbox("Device", ["cuda", "cpu"])
+# Auto-detect available device
+cuda_available = torch.cuda.is_available()
+device_options = ["cuda"] if cuda_available else ["cpu"]
+device = st.sidebar.selectbox("Device", device_options, index=0, disabled=len(device_options) == 1)
+
+if cuda_available:
+    st.sidebar.info(f"CUDA available: {torch.cuda.get_device_name(0)}")
+else:
+    st.sidebar.warning("CUDA not available. Using CPU.")
 
 # Model settings
 st.sidebar.subheader("Model")
@@ -101,24 +111,34 @@ with col_ir:
 
 # ------------------ MAIN DASHBOARD ------------------
 if visible_file:
-    # Save uploaded files
-    visible_path = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-    visible_path.write(visible_file.read())
-
-    ir_path = None
-    if ir_file:
-        ir_path = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-        ir_path.write(ir_file.read())
-        st.info("IR video loaded - multimodal mode")
-    else:
-        st.warning("IR video not provided - visible only mode")
-
-    # Initialize pipeline
+    # Track temporary file paths for cleanup
+    visible_temp_path = None
+    ir_temp_path = None
+    frame_source = None
+    
     try:
+        # Save uploaded files
+        visible_temp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+        visible_temp.write(visible_file.read())
+        visible_temp.close()
+        visible_temp_path = Path(visible_temp.name)
+
+        ir_temp_path = None
+        if ir_file:
+            ir_temp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+            ir_temp.write(ir_file.read())
+            ir_temp.close()
+            ir_temp_path = Path(ir_temp.name)
+            st.info("IR video loaded - multimodal mode")
+        else:
+            st.warning("IR video not provided - visible only mode")
+
+        # Initialize pipeline
         with st.spinner("Initializing models..."):
             # Load configuration
             config = get_config()
             config.model.device = device
+            st.info(f"Using device: {device}")
 
             # Load model
             model = VigiLensModel(device=device)
@@ -148,7 +168,7 @@ if visible_file:
             )
 
             # Load frame source
-            frame_source = create_frame_source(visible_path.name, ir_path.name if ir_path else None)
+            frame_source = create_frame_source(str(visible_temp_path), str(ir_temp_path) if ir_temp_path else None)
 
         st.success("Pipeline initialized successfully")
 
@@ -157,7 +177,7 @@ if visible_file:
 
         with col_video:
             video_placeholder = st.empty()
-            ir_placeholder = st.empty() if show_ir and ir_path else None
+            ir_placeholder = st.empty() if show_ir and ir_temp_path else None
             mask_placeholder = st.empty() if show_mask else None
 
         with col_metrics:
@@ -231,21 +251,43 @@ if visible_file:
             frame_count += 1
             score_history.append(result['smoothed_score'])
 
-        # Cleanup
-        frame_source.release()
-        pipeline.reset_stream()
-        Path(visible_path.name).unlink(missing_ok=True)
-        if ir_path:
-            Path(ir_path.name).unlink(missing_ok=True)
-
         st.success(f"Processing complete - {frame_count} frames processed")
 
     except Exception as e:
         st.error(f"Error: {str(e)}")
-        if visible_path:
-            Path(visible_path.name).unlink(missing_ok=True)
-        if ir_path:
-            Path(ir_path.name).unlink(missing_ok=True)
+        import traceback
+        st.error(traceback.format_exc())
+    
+    finally:
+        # Cleanup: release resources and delete temporary files
+        if frame_source is not None:
+            try:
+                frame_source.release()
+            except Exception as e:
+                st.warning(f"Error releasing frame source: {e}")
+        
+        if pipeline is not None:
+            try:
+                pipeline.reset_stream()
+            except Exception as e:
+                st.warning(f"Error resetting pipeline: {e}")
+        
+        # Delete temporary files with retries for Windows file-lock errors
+        def safe_delete(path, max_retries=3, delay=0.5):
+            if path is None or not path.exists():
+                return
+            for attempt in range(max_retries):
+                try:
+                    path.unlink(missing_ok=True)
+                    return
+                except PermissionError as e:
+                    if attempt < max_retries - 1:
+                        time.sleep(delay)
+                    else:
+                        st.warning(f"Could not delete temporary file {path}: {e}")
+        
+        safe_delete(visible_temp_path)
+        safe_delete(ir_temp_path)
 
 else:
     st.info("Please upload a visible video to begin analysis")

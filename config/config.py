@@ -9,6 +9,7 @@ This module contains all configurable parameters for the system including:
 """
 
 from dataclasses import dataclass
+import torch
 
 
 @dataclass
@@ -31,7 +32,11 @@ class ModelConfig:
     lstm_dropout: float = 0.2
     
     # Device
-    device: str = "cuda"
+    device: str = None  # Will be set to default in __post_init__
+    
+    def __post_init__(self):
+        if self.device is None:
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 @dataclass
@@ -52,6 +57,13 @@ class TrainingConfig:
     # Checkpointing
     checkpoint_dir: str = "checkpoints"
     save_interval: int = 10
+    
+    # Video formats
+    supported_video_extensions: list = None  # Will be set to default in __post_init__
+    
+    def __post_init__(self):
+        if self.supported_video_extensions is None:
+            self.supported_video_extensions = ['.mp4', '.avi', '.mov', '.mkv']
 
 
 @dataclass

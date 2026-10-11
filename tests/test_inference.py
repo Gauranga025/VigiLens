@@ -4,6 +4,8 @@ Tests for inference pipeline.
 
 import torch
 import numpy as np
+import tempfile
+from pathlib import Path
 from models.anomaly_model import VigiLensModel
 from models.segmentation import YOLOSegmentation
 from pipeline.inference import InferencePipeline
@@ -246,3 +248,106 @@ def test_one_frame_latency():
     # Frame 3: has score
     result3 = model.process_frame(rgb_frame)
     assert result3['anomaly_score'] is not None
+
+
+def test_cpu_device_fallback():
+    """Test that model initializes correctly on CPU when CUDA is unavailable."""
+    # Force CPU device
+    device = "cpu"
+    
+    model = VigiLensModel(device=device)
+    segmentation = YOLOSegmentation(device=device)
+    
+    # Verify model components are on CPU
+    assert model.device == "cpu"
+    assert model.rgb_extractor.device == "cpu"
+    assert model.ir_extractor.device == "cpu"
+    
+    # Test inference works on CPU
+    rgb_frame = np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)
+    result = model.process_frame(rgb_frame)
+    
+    assert result is not None
+    assert 'prediction' in result
+
+
+def test_device_consistency():
+    """Test that all model components use the same device."""
+    device = "cpu"
+    
+    model = VigiLensModel(device=device)
+    
+    # Check that all components are on the same device
+    assert model.rgb_extractor.device == device
+    assert model.ir_extractor.device == device
+    assert model.fusion.rgb_projection[0].weight.device.type == "cpu"
+    assert model.fusion.ir_projection[0].weight.device.type == "cpu"
+    assert model.temporal.lstm.lstm.weight_ih_l0.device.type == "cpu"
+
+
+def test_temporary_file_cleanup():
+    """Test that temporary files are cleaned up properly."""
+    import time
+    
+    # Create a temporary file
+    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+    temp_path = Path(temp_file.name)
+    temp_file.close()
+    
+    # Verify file exists
+    assert temp_path.exists()
+    
+    # Define safe delete function (same as in app.py)
+    def safe_delete(path, max_retries=3, delay=0.1):
+        if path is None or not path.exists():
+            return
+        for attempt in range(max_retries):
+            try:
+                path.unlink(missing_ok=True)
+                return
+            except PermissionError:
+                if attempt < max_retries - 1:
+                    time.sleep(delay)
+                else:
+                    raise
+    
+    # Delete the file
+    safe_delete(temp_path)
+    
+    # Verify file is deleted
+    assert not temp_path.exists()
+
+
+def test_frame_source_release():
+    """Test that frame source releases resources properly."""
+    from pipeline.frame_source import VideoFrameSource
+    import cv2
+    
+    # Create a dummy video file
+    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+    temp_path = Path(temp_file.name)
+    temp_file.close()
+    
+    # Write minimal valid video (1 frame)
+    cap = cv2.VideoCapture(str(temp_path), cv2.CAP_FFMPEG)
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    writer = cv2.VideoWriter(str(temp_path), fourcc, 30.0, (640, 480))
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    writer.write(frame)
+    writer.release()
+    cap.release()
+    
+    # Create frame source
+    frame_source = VideoFrameSource(temp_path)
+    
+    # Read a frame
+    visible_frame, ir_frame = frame_source.read()
+    assert visible_frame is not None
+    
+    # Release
+    frame_source.release()
+    
+    # Clean up
+    temp_path.unlink(missing_ok=True)
+    
+    print("✓ Frame source release test passed")

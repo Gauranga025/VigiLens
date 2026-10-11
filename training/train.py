@@ -10,7 +10,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 import logging
 import json
 import numpy as np
@@ -88,9 +88,10 @@ def train_epoch(model: VigiLensModel,
             rgb_next = rgb_sequence[:, t + 1]
             ir_next = ir_sequence[:, t + 1] if ir_sequence is not None else None
 
-            # Get modality availability for this timestep
-            rgb_avail_t = rgb_available[t].item() if isinstance(rgb_available, torch.Tensor) else True
-            ir_avail_t = ir_available[t].item() if isinstance(ir_available, torch.Tensor) and ir_frame is not None else False
+            # Modality availability is per-batch-sample, not per-timestep
+            # rgb_available and ir_available are shape (B,)
+            rgb_avail = rgb_available if isinstance(rgb_available, torch.Tensor) else torch.ones(batch_size, dtype=torch.bool, device=device)
+            ir_avail = ir_available if isinstance(ir_available, torch.Tensor) else torch.zeros(batch_size, dtype=torch.bool, device=device)
 
             # Extract features for current frame with no_grad for frozen components
             with torch.no_grad():
@@ -98,7 +99,7 @@ def train_epoch(model: VigiLensModel,
                 rgb_features_list = []
                 rgb_masks_list = []
                 for b in range(batch_size):
-                    if rgb_avail_t:
+                    if rgb_avail[b]:
                         rgb_np = rgb_frame[b].cpu().numpy().astype(np.uint8)
                         rgb_mask = segmentation.extract_person_mask(rgb_np)
                         rgb_features_np = rgb_extractor.extract(rgb_np, rgb_mask)
@@ -111,16 +112,18 @@ def train_epoch(model: VigiLensModel,
                 # Extract IR features for current frame
                 ir_features_list = []
                 ir_masks_list = []
-                if ir_frame is not None:
+                # Only extract IR features if IR videos are actually available
+                # (not just zero tensors from RGB-only mode)
+                if ir_frame is not None and not (ir_frame == 0).all():
                     for b in range(batch_size):
-                        if ir_avail_t and rgb_masks_list[b] is not None:
+                        if ir_avail[b] and rgb_masks_list[b] is not None:
                             ir_np = ir_frame[b].cpu().numpy().astype(np.uint8)
                             # Resize RGB mask to IR dimensions
                             ir_mask = cv2.resize(rgb_masks_list[b], (ir_np.shape[1], ir_np.shape[0]))
                             ir_features_np = ir_extractor.extract(ir_np, ir_mask)
                             ir_features_list.append(ir_features_np)
                             ir_masks_list.append(ir_mask)
-                        elif ir_avail_t:
+                        elif ir_avail[b]:
                             # IR-only mode: full frame
                             ir_np = ir_frame[b].cpu().numpy().astype(np.uint8)
                             ir_features_np = ir_extractor.extract(ir_np, None)
@@ -138,30 +141,35 @@ def train_epoch(model: VigiLensModel,
             ir_features = torch.from_numpy(np.array(ir_features_list)).float().to(device) if any(f.any() for f in ir_features_list) else None
 
             # Fuse features (trainable)
-            fused = fusion(rgb_features, ir_features, rgb_avail_t, ir_avail_t)
+            # Use per-sample availability for fusion
+            rgb_avail_any = rgb_avail.any().item()
+            ir_avail_any = ir_avail.any().item()
+            fused = fusion(rgb_features, ir_features, rgb_avail_any, ir_avail_any)
 
             # Extract features for next frame (target) with no_grad
             with torch.no_grad():
                 rgb_next_features_list = []
                 rgb_next_masks_list = []
                 for b in range(batch_size):
-                    if rgb_avail_t:
+                    if rgb_avail[b]:
                         rgb_next_np = rgb_next[b].cpu().numpy().astype(np.uint8)
                         rgb_next_mask = segmentation.extract_person_mask(rgb_next_np)
                         rgb_next_features_np = rgb_extractor.extract(rgb_next_np, rgb_next_mask)
                         rgb_next_features_list.append(rgb_next_features_np)
+                        rgb_next_masks_list.append(rgb_next_mask)
                     else:
                         rgb_next_features_list.append(np.zeros(2048))
+                        rgb_next_masks_list.append(None)
 
                 ir_next_features_list = []
                 if ir_next is not None:
                     for b in range(batch_size):
-                        if ir_avail_t and rgb_next_masks_list[b] is not None:
+                        if ir_avail[b] and rgb_next_masks_list[b] is not None:
                             ir_next_np = ir_next[b].cpu().numpy().astype(np.uint8)
                             ir_next_mask = cv2.resize(rgb_next_masks_list[b], (ir_next_np.shape[1], ir_next_np.shape[0]))
                             ir_next_features_np = ir_extractor.extract(ir_next_np, ir_next_mask)
                             ir_next_features_list.append(ir_next_features_np)
-                        elif ir_avail_t:
+                        elif ir_avail[b]:
                             ir_next_np = ir_next[b].cpu().numpy().astype(np.uint8)
                             ir_next_features_np = ir_extractor.extract(ir_next_np, None)
                             ir_next_features_list.append(ir_next_features_np)
@@ -175,16 +183,16 @@ def train_epoch(model: VigiLensModel,
             ir_next_features = torch.from_numpy(np.array(ir_next_features_list)).float().to(device) if any(f.any() for f in ir_next_features_list) else None
 
             # Fuse next frame features
-            fused_next = fusion(rgb_next_features, ir_next_features, rgb_avail_t, ir_avail_t)
+            fused_next = fusion(rgb_next_features, ir_next_features, rgb_avail_any, ir_avail_any)
 
             # Training step: z_t -> predict z_(t+1)
             loss, hidden_state = model.training_step(
-                fused.unsqueeze(1),  # (B, 1, 512)
-                fused_next.unsqueeze(1),  # (B, 1, 512)
+                fused,  # (B, 512)
+                fused_next,  # (B, 512)
                 hidden_state
             )
 
-            batch_loss += loss.item()
+            batch_loss += loss
 
         # Backward pass
         optimizer.zero_grad()
@@ -461,7 +469,7 @@ def get_repo_root() -> Path:
     return Path(__file__).parent.parent
 
 
-def discover_videos(data_dir: Path, split: str, modality: str) -> List[Path]:
+def discover_videos(data_dir: Path, split: str, modality: str, extensions: List[str] = None, required: bool = True) -> List[Path]:
     """
     Discover video files in dataset directory.
 
@@ -469,19 +477,115 @@ def discover_videos(data_dir: Path, split: str, modality: str) -> List[Path]:
         data_dir: Base data directory
         split: 'train' or 'val'
         modality: 'rgb' or 'ir'
+        extensions: List of video extensions to search (default from config)
+        required: If True, raises error when directory or videos not found
 
     Returns:
-        Sorted list of video paths
+        Sorted list of video paths (empty if not required and not found)
     """
     video_dir = data_dir / split / modality
     if not video_dir.exists():
-        raise ValueError(f"Video directory not found: {video_dir}")
+        if required:
+            raise ValueError(f"Video directory not found: {video_dir}")
+        else:
+            logger.warning(f"Video directory not found: {video_dir}. {modality.upper()} modality will be disabled.")
+            return []
 
-    videos = sorted(video_dir.glob("*.mp4"))
+    if extensions is None:
+        from config.config import SystemConfig
+        config = SystemConfig()
+        extensions = config.training.supported_video_extensions
+
+    videos = []
+    for ext in extensions:
+        videos.extend(video_dir.glob(f"*{ext}"))
+
     if not videos:
-        raise ValueError(f"No .mp4 videos found in {video_dir}")
+        if required:
+            raise ValueError(f"No videos found in {video_dir} with extensions {extensions}")
+        else:
+            logger.warning(f"No videos found in {video_dir} with extensions {extensions}. {modality.upper()} modality will be disabled.")
+            return []
 
-    return videos
+    return sorted(videos)
+
+
+def extract_sequence_id(video_path: Path) -> str:
+    """
+    Extract sequence identifier from video filename.
+    
+    Removes modality suffix and extension to get the base sequence ID.
+    Examples:
+        scene001_rgb.mp4 -> scene001
+        scene001_ir.avi -> scene001
+        video1_rgb.mov -> video1
+    
+    Args:
+        video_path: Path to video file
+        
+    Returns:
+        Sequence identifier string
+    """
+    stem = video_path.stem  # filename without extension
+    
+    # Remove common modality suffixes
+    for suffix in ['_rgb', '_ir', '-rgb', '-ir', '_visible', '_thermal']:
+        if stem.lower().endswith(suffix.lower()):
+            stem = stem[:-len(suffix)]
+    
+    return stem
+
+
+def pair_videos_by_sequence_id(rgb_videos: List[Path], ir_videos: List[Path]) -> List[Tuple[Path, Path]]:
+    """
+    Pair RGB and IR videos by their sequence identifier.
+    
+    Args:
+        rgb_videos: List of RGB video paths
+        ir_videos: List of IR video paths
+        
+    Returns:
+        List of (rgb_path, ir_path) tuples
+        
+    Raises:
+        ValueError: If pairing fails (unmatched videos, duplicates, etc.)
+    """
+    # Build dictionaries mapping sequence ID to video path
+    rgb_dict = {}
+    for rgb_path in rgb_videos:
+        seq_id = extract_sequence_id(rgb_path)
+        if seq_id in rgb_dict:
+            raise ValueError(f"Duplicate RGB sequence ID: {seq_id} ({rgb_dict[seq_id]} and {rgb_path})")
+        rgb_dict[seq_id] = rgb_path
+    
+    ir_dict = {}
+    for ir_path in ir_videos:
+        seq_id = extract_sequence_id(ir_path)
+        if seq_id in ir_dict:
+            raise ValueError(f"Duplicate IR sequence ID: {seq_id} ({ir_dict[seq_id]} and {ir_path})")
+        ir_dict[seq_id] = ir_path
+    
+    # Find common sequence IDs
+    common_ids = set(rgb_dict.keys()) & set(ir_dict.keys())
+    
+    # Check for unmatched videos
+    unmatched_rgb = set(rgb_dict.keys()) - common_ids
+    unmatched_ir = set(ir_dict.keys()) - common_ids
+    
+    if unmatched_rgb:
+        logger.warning(f"Unmatched RGB videos: {unmatched_rgb}")
+    if unmatched_ir:
+        logger.warning(f"Unmatched IR videos: {unmatched_ir}")
+    
+    if not common_ids:
+        raise ValueError("No matching RGB/IR pairs found. Check filename conventions.")
+    
+    # Create paired list sorted by sequence ID
+    pairs = [(rgb_dict[seq_id], ir_dict[seq_id]) for seq_id in sorted(common_ids)]
+    
+    logger.info(f"Paired {len(pairs)} RGB/IR video pairs by sequence ID")
+    
+    return pairs
 
 
 def validate_dataset(train_rgb: List[Path],
@@ -500,13 +604,10 @@ def validate_dataset(train_rgb: List[Path],
     Raises:
         ValueError: If validation fails
     """
-    # Check counts
-    if len(train_rgb) != len(train_ir):
-        raise ValueError(f"Train RGB count ({len(train_rgb)}) != Train IR count ({len(train_ir)})")
-
-    if len(val_rgb) != len(val_ir):
-        raise ValueError(f"Validation RGB count ({len(val_rgb)}) != Validation IR count ({len(val_ir)})")
-
+    # Pair by sequence ID
+    train_pairs = pair_videos_by_sequence_id(train_rgb, train_ir)
+    val_pairs = pair_videos_by_sequence_id(val_rgb, val_ir)
+    
     # Check videos are readable
     def check_readable(videos: List[Path], name: str):
         for video in videos:
@@ -521,8 +622,8 @@ def validate_dataset(train_rgb: List[Path],
     check_readable(val_ir, "validation IR")
 
     # Check FPS and frame count compatibility for paired videos
-    def check_compatibility(rgb_videos: List[Path], ir_videos: List[Path], split_name: str):
-        for rgb_path, ir_path in zip(rgb_videos, ir_videos):
+    def check_compatibility(pairs: List[Tuple[Path, Path]], split_name: str):
+        for rgb_path, ir_path in pairs:
             cap_rgb = cv2.VideoCapture(str(rgb_path))
             cap_ir = cv2.VideoCapture(str(ir_path))
 
@@ -540,8 +641,8 @@ def validate_dataset(train_rgb: List[Path],
             if rgb_frames != ir_frames:
                 logger.warning(f"{split_name}: Frame count mismatch - {rgb_path.name} ({rgb_frames} frames) vs {ir_path.name} ({ir_frames} frames)")
 
-    check_compatibility(train_rgb, train_ir, "train")
-    check_compatibility(val_rgb, val_ir, "validation")
+    check_compatibility(train_pairs, "train")
+    check_compatibility(val_pairs, "validation")
 
 
 if __name__ == "__main__":
@@ -551,14 +652,35 @@ if __name__ == "__main__":
     repo_root = get_repo_root()
     data_dir = repo_root / "Data"
 
-    # Discover videos
-    train_rgb_videos = discover_videos(data_dir, "train", "rgb")
-    train_ir_videos = discover_videos(data_dir, "train", "ir")
-    val_rgb_videos = discover_videos(data_dir, "val", "rgb")
-    val_ir_videos = discover_videos(data_dir, "val", "ir")
+    # Discover videos (IR is optional)
+    train_rgb_videos = discover_videos(data_dir, "train", "rgb", required=True)
+    train_ir_videos = discover_videos(data_dir, "train", "ir", required=False)
+    val_rgb_videos = discover_videos(data_dir, "val", "rgb", required=True)
+    val_ir_videos = discover_videos(data_dir, "val", "ir", required=False)
 
-    # Validate dataset
-    validate_dataset(train_rgb_videos, train_ir_videos, val_rgb_videos, val_ir_videos)
+    # Check if IR is available
+    ir_available = len(train_ir_videos) > 0 or len(val_ir_videos) > 0
+    
+    if ir_available:
+        # Validate dataset and get paired videos
+        validate_dataset(train_rgb_videos, train_ir_videos, val_rgb_videos, val_ir_videos)
+        
+        # Re-order videos by sequence ID pairing
+        train_pairs = pair_videos_by_sequence_id(train_rgb_videos, train_ir_videos)
+        val_pairs = pair_videos_by_sequence_id(val_rgb_videos, val_ir_videos)
+        
+        train_rgb_videos = [p[0] for p in train_pairs]
+        train_ir_videos = [p[1] for p in train_pairs]
+        val_rgb_videos = [p[0] for p in val_pairs]
+        val_ir_videos = [p[1] for p in val_pairs]
+        
+        logger.info(f"Training with RGB+IR: {len(train_rgb_videos)} train pairs, {len(val_rgb_videos)} val pairs")
+    else:
+        logger.warning("No IR videos found. Training in RGB-only mode.")
+        logger.warning("RGB-only mode uses the fusion layer's single-modality adaptation.")
+        logger.warning("Note: RGB-only checkpoints may not be directly comparable to RGB+IR checkpoints.")
+        train_ir_videos = None
+        val_ir_videos = None
 
     # Load config
     config = SystemConfig()
@@ -572,9 +694,10 @@ if __name__ == "__main__":
     print("VigiLens Training")
     print("="*50)
     print(f"Train RGB videos: {len(train_rgb_videos)}")
-    print(f"Train IR videos: {len(train_ir_videos)}")
+    print(f"Train IR videos: {len(train_ir_videos) if train_ir_videos else 0}")
     print(f"Validation RGB videos: {len(val_rgb_videos)}")
-    print(f"Validation IR videos: {len(val_ir_videos)}")
+    print(f"Validation IR videos: {len(val_ir_videos) if val_ir_videos else 0}")
+    print(f"Mode: {'RGB+IR' if ir_available else 'RGB-only'}")
     print(f"\nSequence length: {config.training.sequence_length}")
     print(f"Batch size: {config.training.batch_size}")
     print(f"Epochs: {config.training.num_epochs}")

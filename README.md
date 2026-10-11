@@ -185,24 +185,26 @@ Data/
 ├── train/
 │   ├── rgb/
 │   │   ├── scene001_rgb.mp4
-│   │   ├── scene002_rgb.mp4
+│   │   ├── scene002_rgb.avi
 │   │   └── ...
 │   └── ir/
-│       ├── scene001_ir.mp4
+│       ├── scene001_ir.avi
 │       ├── scene002_ir.mp4
 │       └── ...
 └── val/
     ├── rgb/
-    │   ├── scene010_rgb.mp4
+    │   ├── scene010_rgb.mov
     │   └── ...
     └── ir/
-        ├── scene010_ir.mp4
+        ├── scene010_ir.mkv
         └── ...
 ```
 
 **Important notes:**
-- RGB and IR videos are paired deterministically by **sorted list order**, not by filename
-- Use consistent naming (e.g., `scene001_rgb.mp4` pairs with `scene001_ir.mp4`) to avoid confusion
+- RGB and IR videos are paired by **sequence identifier** extracted from filename
+- Use consistent naming with modality suffix: `scene001_rgb.mp4` pairs with `scene001_ir.avi`
+- Supported video formats: `.mp4`, `.avi`, `.mov`, `.mkv`
+- RGB and IR can have different extensions if they share the same sequence ID
 - `train/` and `val/` directories represent the manual train/validation split
 - Training videos must contain **only normal pedestrian behavior** (walking, standing)
 - RGB and IR videos must be synchronized (same FPS and frame count)
